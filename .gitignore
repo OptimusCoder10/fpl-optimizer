@@ -1,0 +1,36 @@
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Private local project specification
+docs/spec/
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Node.js and Next.js-generated files
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+.vercel/
+
+# Logs and temporary operating-system files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
