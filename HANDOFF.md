@@ -5,7 +5,7 @@ This file tracks live build progress — what's actually done, not just what's p
 ## Current Phase
 Phase 1 — Data Layer (see docs/spec/10-roadmap.html)
 
-The v1 specification redesign was written on 2026-10-05. See `docs/spec/AMENDMENTS.md` for the full decision register and revised sections 01–12 for the implementation contract. Phase 1 slice 1.1 is implemented against the disposable PostgreSQL database; it remains development-only partial shared coverage until slice 1.2 adds fixtures and complete shared publication.
+The v1 specification redesign was written on 2026-10-05. See `docs/spec/AMENDMENTS.md` for the full decision register and revised sections 01–12 for the implementation contract. Phase 1 slices 1.1 and 1.2a are implemented against the disposable PostgreSQL database. Bootstrap and fixtures now form one atomic shared publication; advisory locking and freshness/age gates remain for slice 1.2b.
 
 ## This Phase — Task Checklist
 - [x] Phase 1A backend/data-layer foundation created
@@ -20,7 +20,9 @@ The v1 specification redesign was written on 2026-10-05. See `docs/spec/AMENDMEN
 - [x] Specification presentation refreshed with a shared light, responsive and accessible visual theme; contract text unchanged
 - [x] Phase 1A hardening: redacted database credentials, guarded test destinations and verified TLS for remote database hosts
 - [x] 1.1 Bootstrap slice: necessary models/migration + validated bootstrap → database → read-back and idempotency; development-only until fixtures complete the shared context
-- [ ] 1.2 Shared-context slice: fixture model/migration + full catalog/fixtures atomic publication, advisory lock, deadline/fixture read-back, rollback and 6-hour/2-hour freshness checks
+- [x] 1.2a Shared-publication slice: fixture model/migration + full catalog/fixtures atomic publication, deadline/per-team fixture-count read-back, rollback and idempotent replay
+- [ ] 1.2b Shared-ingestion controls: advisory lock plus 6-hour/2-hour freshness and age-warning checks
+- [ ] Before HTTP ingestion: validate fixture-list completeness before treating an empty target schedule as a blank (§05A)
 - [ ] 1.3 Single-player slice: history model/checkpoint metadata + element-summary → atomic player rows/checkpoint → totals; double-gameweek and failure checks
 - [ ] 1.4 Resumable-population slice: durable required IDs/generations, per-player retry/backoff, bounded runs, interruption/restart, independent success, honest age/coverage and candidate/prior eligibility
 - [ ] 1.5 Prior-season slice: pinned fixture archive → validated season identities/history → scoring reconciliation and compatible prior inputs
@@ -37,6 +39,7 @@ Anything implemented differently than `docs/spec/` says goes here immediately. S
 
 - No new implementation deviations were introduced by the documentation-only redesign. The proposed v1 design changed substantially; use the updated spec rather than the pre-amendment six-table plan, inline-refresh flow or old prediction/objective equations.
 - Slice 1.1 has no known implementation deviation. Because `bootstrap-static` does not carry the project's season namespace, rules version or source observation time, the storage service requires those values as explicit validated publication context rather than inferring them from an event number or local clock.
+- Slice 1.2a has no known implementation deviation. The fixtures boundary rejects empty collections, duplicate fixture IDs, unknown team/event references and bootstrap clubs absent from the full-season fixture collection. This is structural completeness validation; transport truncation must still be rejected by the future HTTP ingestion layer before constructing the envelope.
 
 ## Known Issues / Gotchas
 Things the next session should know before touching this code.
@@ -68,6 +71,16 @@ Which tool did which piece of work — useful for knowing where to look first if
 - Codex — 2026-10-05: hardened the Phase 1A database foundation with SecretStr redaction, a guarded `_test` destination, driver-native verified TLS for remote asyncpg connections and focused regression tests; reran the full suite and Alembic checks against disposable PostgreSQL.
 - Codex — 2026-10-05: added `docs/spec/theme-light.css` and applied it to all twelve HTML specification pages. The shared override introduces a light palette, clearer contrast and spacing, subtle card/table depth, readable status colors, responsive navigation and reduced-motion support. After the owner's local viewer continued showing the old theme, the same rules were embedded as an inline fallback in every page so each HTML file renders correctly by itself. HTML contract content, `AMENDMENTS.md`, application code and configuration were not changed.
 - Codex — 2026-10-06: implemented Phase 1 slice 1.1 with season-scoped SQLAlchemy models, one Alembic revision, strict Pydantic parsing for consumed `bootstrap-static` fields, replay-safe PostgreSQL upserts, deterministic read-back, a trimmed non-manager fixture captured from the public endpoint, and disposable-database migration/round-trip/idempotency tests.
+- Codex — 2026-10-06: implemented Phase 1 slice 1.2a with the fixtures model and migration, strict `/api/fixtures/` parsing, cross-endpoint validation, one atomic bootstrap/fixtures publication, target-deadline and per-team fixture-count read-back, and PostgreSQL rollback/replay tests. Captured and trimmed the public fixtures response; no manager data, HTTP application calls, advisory lock, freshness gates or player history were added.
+
+## Shared Publication Slice 1.2a Verification — 2026-10-06
+- The saved fixtures sample contains one finished and one future public 2026–27 match and references only the three clubs retained in the bootstrap sample. Unconsumed match-stat detail is omitted; no manager data is present.
+- Fixture event and kickoff remain nullable and timezone-aware when present; per-side FDR, scores, status flags, season-scoped team/event references and first-observed gameweek finalization evidence are stored.
+- The read path selects the earliest deadline strictly after the supplied aware timestamp and returns a count for every catalog club. Tests cover one-fixture teams, a zero-fixture blank and a synthetic double without collapsing fixture rows.
+- Bootstrap and fixtures are accepted only as one cross-validated envelope. A database-backed injected fixture-write failure proved earlier catalog rows, fixture rows, publication version and success timestamp remain unchanged; exact replay keeps its version and row counts.
+- `uv run --frozen pytest -q`: 32 passed, including migration from empty, strict boundary/cross-endpoint validation, atomic rollback, exact replay, target read-back, blanks and doubles.
+- `alembic check`: passed with “No new upgrade operations detected.”
+- Deliberate choices: the existing explicit shared `source_observed_at` remains the provenance/version key for the paired fetch; the first `gameweek_data_checked_at` is preserved while a fixture remains assigned to that event and resets if the source moves it to another event; target means the earliest official deadline greater than `as_of`, not the upstream `is_next` flag.
 
 ## Bootstrap Slice 1.1 Verification — 2026-10-06
 - The saved fixture contains one club, two players and two gameweeks from the public 2026–27 `bootstrap-static` response. It retains representative nulls and numeric strings and contains no manager data.

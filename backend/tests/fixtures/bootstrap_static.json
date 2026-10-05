@@ -32,6 +32,32 @@
       "strength_attack_away": 0,
       "strength_defence_home": 0,
       "strength_defence_away": 0
+    },
+    {
+      "code": 36,
+      "id": 5,
+      "name": "Brighton",
+      "short_name": "BHA",
+      "strength": null,
+      "strength_overall_home": 3,
+      "strength_overall_away": 4,
+      "strength_attack_home": 0,
+      "strength_attack_away": 0,
+      "strength_defence_home": 0,
+      "strength_defence_away": 0
+    },
+    {
+      "code": 9,
+      "id": 7,
+      "name": "Coventry City",
+      "short_name": "COV",
+      "strength": null,
+      "strength_overall_home": 2,
+      "strength_overall_away": 2,
+      "strength_attack_home": 0,
+      "strength_attack_away": 0,
+      "strength_defence_home": 0,
+      "strength_defence_away": 0
     }
   ],
   "elements": [

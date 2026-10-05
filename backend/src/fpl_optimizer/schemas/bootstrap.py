@@ -26,7 +26,7 @@ def _parse_nullable_numeric_string(value: object) -> Decimal | None:
         raise ValueError("FPL numeric string is not a valid decimal") from error
 
 
-def _require_aware_datetime(value: datetime) -> datetime:
+def require_aware_datetime(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must include a UTC offset")
     return value
@@ -113,7 +113,7 @@ class BootstrapGameweek(BootstrapBoundaryModel):
     @model_validator(mode="after")
     def validate_deadline_timezone(self) -> "BootstrapGameweek":
         if self.deadline_time is not None:
-            _require_aware_datetime(self.deadline_time)
+            require_aware_datetime(self.deadline_time)
         return self
 
 
@@ -146,8 +146,8 @@ class BootstrapEnvelope(BootstrapBoundaryModel):
         return self
 
 
-class BootstrapPublication(BaseModel):
-    """Explicit context absent from the FPL response itself."""
+class SharedPublication(BaseModel):
+    """Explicit shared-publication context absent from the FPL responses."""
 
     model_config = ConfigDict(strict=True)
 
@@ -157,9 +157,9 @@ class BootstrapPublication(BaseModel):
     published_at: datetime
 
     @model_validator(mode="after")
-    def validate_timestamp_timezones(self) -> "BootstrapPublication":
-        _require_aware_datetime(self.source_observed_at)
-        _require_aware_datetime(self.published_at)
+    def validate_timestamp_timezones(self) -> "SharedPublication":
+        require_aware_datetime(self.source_observed_at)
+        require_aware_datetime(self.published_at)
         if self.published_at < self.source_observed_at:
             raise ValueError("published_at cannot precede source_observed_at")
         return self

@@ -1,0 +1,40 @@
+[
+  {
+    "code": 2645195,
+    "event": 1,
+    "finished": true,
+    "finished_provisional": true,
+    "id": 1,
+    "kickoff_time": "2026-08-21T19:00:00Z",
+    "minutes": 90,
+    "provisional_start_time": false,
+    "started": true,
+    "team_a": 7,
+    "team_a_score": 0,
+    "team_h": 1,
+    "team_h_score": 3,
+    "stats": [],
+    "team_h_difficulty": 2,
+    "team_a_difficulty": 5,
+    "pulse_id": 0
+  },
+  {
+    "code": 2645565,
+    "event": 38,
+    "finished": false,
+    "finished_provisional": false,
+    "id": 371,
+    "kickoff_time": "2027-05-30T15:00:00Z",
+    "minutes": 0,
+    "provisional_start_time": false,
+    "started": false,
+    "team_a": 5,
+    "team_a_score": null,
+    "team_h": 1,
+    "team_h_score": null,
+    "stats": [],
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 5,
+    "pulse_id": 0
+  }
+]

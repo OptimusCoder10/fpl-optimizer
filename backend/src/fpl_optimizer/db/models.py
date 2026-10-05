@@ -1,4 +1,4 @@
-"""Relational models for the bootstrap-static catalog slice."""
+"""Relational models for shared FPL data."""
 
 from datetime import datetime
 from decimal import Decimal
@@ -141,8 +141,75 @@ class Gameweek(Base):
     data_checked: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
 
+class Fixture(Base):
+    """One season-scoped Premier League match from the fixtures endpoint."""
+
+    __tablename__ = "fixtures"
+    __table_args__ = (
+        PrimaryKeyConstraint("season_id", "id"),
+        ForeignKeyConstraint(
+            ["season_id", "gameweek_id"],
+            ["gameweeks.season_id", "gameweeks.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["season_id", "home_team_id"],
+            ["teams.season_id", "teams.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["season_id", "away_team_id"],
+            ["teams.season_id", "teams.id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("id > 0", name="ck_fixtures_id_positive"),
+        CheckConstraint(
+            "home_team_id <> away_team_id", name="ck_fixtures_distinct_teams"
+        ),
+        CheckConstraint(
+            "home_team_score IS NULL OR home_team_score >= 0",
+            name="ck_fixtures_home_score_nonnegative",
+        ),
+        CheckConstraint(
+            "away_team_score IS NULL OR away_team_score >= 0",
+            name="ck_fixtures_away_score_nonnegative",
+        ),
+        CheckConstraint(
+            "home_team_difficulty BETWEEN 1 AND 5",
+            name="ck_fixtures_home_difficulty",
+        ),
+        CheckConstraint(
+            "away_team_difficulty BETWEEN 1 AND 5",
+            name="ck_fixtures_away_difficulty",
+        ),
+        Index("ix_fixtures_season_gameweek", "season_id", "gameweek_id"),
+        Index("ix_fixtures_season_home_team", "season_id", "home_team_id"),
+        Index("ix_fixtures_season_away_team", "season_id", "away_team_id"),
+    )
+
+    season_id: Mapped[str] = mapped_column(
+        ForeignKey("seasons.id", ondelete="CASCADE"), nullable=False
+    )
+    id: Mapped[int] = mapped_column(Integer, nullable=False)
+    external_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    gameweek_id: Mapped[int | None] = mapped_column(Integer)
+    kickoff_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    finished: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    finished_provisional: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    home_team_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    away_team_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    home_team_score: Mapped[int | None] = mapped_column(Integer)
+    away_team_score: Mapped[int | None] = mapped_column(Integer)
+    home_team_difficulty: Mapped[int] = mapped_column(Integer, nullable=False)
+    away_team_difficulty: Mapped[int] = mapped_column(Integer, nullable=False)
+    gameweek_data_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+
 class CacheMetadata(Base):
-    """Publication metadata; only the shared key is populated in slice 1.1."""
+    """Publication metadata; the shared key covers bootstrap and fixtures."""
 
     __tablename__ = "cache_metadata"
     __table_args__ = (

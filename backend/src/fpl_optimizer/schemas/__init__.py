@@ -2,7 +2,13 @@
 
 from fpl_optimizer.schemas.bootstrap import (
     BootstrapEnvelope,
-    BootstrapPublication,
+    SharedPublication,
 )
+from fpl_optimizer.schemas.fixtures import FixturesEnvelope, SharedCatalogEnvelope
 
-__all__ = ["BootstrapEnvelope", "BootstrapPublication"]
+__all__ = [
+    "BootstrapEnvelope",
+    "FixturesEnvelope",
+    "SharedCatalogEnvelope",
+    "SharedPublication",
+]
