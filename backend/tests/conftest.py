@@ -1,7 +1,13 @@
 """Shared pytest fixtures for PostgreSQL-backed smoke tests."""
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest_asyncio
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
 from fpl_optimizer.config import ENV_FILE, Settings
@@ -12,6 +18,7 @@ DEFAULT_TEST_DATABASE_URL = (
     "postgresql+asyncpg://fpl_optimizer:fpl_optimizer_test@"
     "127.0.0.1:5433/fpl_optimizer_test"
 )
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 class DatabaseTestSettings(BaseSettings):
@@ -52,3 +59,29 @@ async def test_engine():
         yield engine
     finally:
         await engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def migrated_test_engine(test_engine):
+    """Rebuild the guarded test schema and apply Alembic from an empty database."""
+    async with test_engine.begin() as connection:
+        await connection.execute(text("DROP SCHEMA public CASCADE"))
+        await connection.execute(text("CREATE SCHEMA public"))
+
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = DatabaseTestSettings().test_database_url
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=BACKEND_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Alembic failed to migrate the empty test database:\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
+
+    yield test_engine

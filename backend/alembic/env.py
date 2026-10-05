@@ -7,6 +7,7 @@ from alembic import context
 from sqlalchemy.engine import Connection
 
 from fpl_optimizer.db.base import Base
+from fpl_optimizer.db import models  # noqa: F401  # Register tables in metadata.
 from fpl_optimizer.db.session import create_database_engine
 
 

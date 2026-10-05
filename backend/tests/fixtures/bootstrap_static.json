@@ -1,0 +1,90 @@
+{
+  "events": [
+    {
+      "id": 1,
+      "name": "Gameweek 1",
+      "deadline_time": "2026-08-21T17:30:00Z",
+      "finished": true,
+      "data_checked": true,
+      "is_current": false,
+      "is_next": false
+    },
+    {
+      "id": 38,
+      "name": "Gameweek 38",
+      "deadline_time": "2027-05-30T13:30:00Z",
+      "finished": false,
+      "data_checked": false,
+      "is_current": false,
+      "is_next": false
+    }
+  ],
+  "teams": [
+    {
+      "code": 3,
+      "id": 1,
+      "name": "Arsenal",
+      "short_name": "ARS",
+      "strength": null,
+      "strength_overall_home": 4,
+      "strength_overall_away": 5,
+      "strength_attack_home": 0,
+      "strength_attack_away": 0,
+      "strength_defence_home": 0,
+      "strength_defence_away": 0
+    }
+  ],
+  "elements": [
+    {
+      "id": 1,
+      "first_name": "David",
+      "second_name": "Raya Martín",
+      "web_name": "Raya",
+      "element_type": 1,
+      "team": 1,
+      "code": 154561,
+      "has_temporary_code": false,
+      "opta_code": "p154561",
+      "now_cost": 61,
+      "can_select": true,
+      "can_transact": true,
+      "removed": false,
+      "status": "a",
+      "chance_of_playing_next_round": null,
+      "form": "6.0",
+      "ep_next": "6.0",
+      "selected_by_percent": "42.3",
+      "ict_index": "10.6",
+      "expected_goals": "0.00",
+      "expected_assists": "0.01",
+      "expected_goal_involvements": "0.01",
+      "expected_goals_conceded": "4.03"
+    },
+    {
+      "id": 5,
+      "first_name": "Jurriën",
+      "second_name": "Timber",
+      "web_name": "J.Timber",
+      "element_type": 2,
+      "team": 1,
+      "code": 445122,
+      "has_temporary_code": false,
+      "opta_code": "p445122",
+      "now_cost": 65,
+      "can_select": true,
+      "can_transact": true,
+      "removed": false,
+      "status": "a",
+      "chance_of_playing_next_round": 100,
+      "form": "0.3",
+      "ep_next": "0.3",
+      "selected_by_percent": "0.4",
+      "ict_index": "1.5",
+      "expected_goals": "0.00",
+      "expected_assists": "0.03",
+      "expected_goal_involvements": "0.03",
+      "expected_goals_conceded": "2.18"
+    }
+  ],
+  "total_players": 8903411
+}

@@ -38,7 +38,9 @@ The test suite connects only to the dedicated `fpl_optimizer_test` database expo
 
 Application database settings come from `DATABASE_URL` in the untracked repository-root `.env`. The backend requires an async SQLAlchemy URL beginning with `postgresql+asyncpg://`.
 
-Phase 1A intentionally contains no application tables or Alembic revisions yet.
+Phase 1 slice 1.1 adds the season-scoped bootstrap catalog tables and the first
+Alembic revision. Fixture completeness, shared-snapshot freshness, and production
+publication remain intentionally deferred to slice 1.2.
 
 ## Specification
 
