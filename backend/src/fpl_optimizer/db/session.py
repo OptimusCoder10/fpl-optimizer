@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from fpl_optimizer.config import Settings, get_settings
 
@@ -36,6 +37,7 @@ def create_database_engine(
     settings: Settings | None = None,
     *,
     echo: bool = False,
+    pooled: bool = True,
 ) -> AsyncEngine:
     """Create an async engine without opening a connection eagerly."""
     resolved_settings = settings or get_settings()
@@ -46,6 +48,7 @@ def create_database_engine(
         database_url,
         echo=echo,
         pool_pre_ping=True,
+        **({"poolclass": NullPool} if not pooled else {}),
         **({"connect_args": connect_args} if connect_args else {}),
     )
 

@@ -2,11 +2,14 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 
 from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from fpl_optimizer.config import Settings
+from fpl_optimizer.db.advisory_lock import ingestion_lock, require_same_database
 from fpl_optimizer.db.models import (
     CacheMetadata,
     Fixture,
@@ -17,9 +20,14 @@ from fpl_optimizer.db.models import (
 )
 from fpl_optimizer.schemas.bootstrap import SharedPublication
 from fpl_optimizer.schemas.fixtures import SharedCatalogEnvelope
+from fpl_optimizer.services.shared_freshness import (
+    SharedFreshness,
+    check_shared_freshness,
+)
 
 
 SHARED_METADATA_KEY = "shared"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -89,6 +97,30 @@ async def _write_fixture_rows(
 
 
 async def publish_shared_catalog(
+    session_factory: async_sessionmaker[AsyncSession],
+    envelope: SharedCatalogEnvelope,
+    publication: SharedPublication,
+    *,
+    settings: Settings | None = None,
+) -> int | None:
+    """Commit one publication under the ingestion lock; None means already busy.
+
+    Own the write transaction so the lock outlives commit/rollback. Once an
+    ingestion command exists, it should acquire ingestion_lock around its whole
+    run, verify the write connection with require_same_database, then call
+    _write_shared_catalog inside its own short write transaction.
+    Publication versions record provenance, not §04B's material context digest.
+    """
+    async with ingestion_lock(settings) as lock_connection:
+        if lock_connection is None:
+            logger.info("Shared ingestion already running")
+            return None
+        async with session_factory.begin() as session:
+            await require_same_database(lock_connection, await session.connection())
+            return await _write_shared_catalog(session, envelope, publication)
+
+
+async def _write_shared_catalog(
     session: AsyncSession,
     envelope: SharedCatalogEnvelope,
     publication: SharedPublication,
@@ -269,6 +301,23 @@ async def publish_shared_catalog(
         )
 
     return publication_version
+
+
+async def read_shared_freshness(
+    session: AsyncSession,
+    season_id: str,
+    *,
+    now: datetime,
+    next_deadline: datetime,
+) -> SharedFreshness:
+    """Evaluate only the metadata committed with a complete shared catalog."""
+    metadata = await session.get(CacheMetadata, (season_id, SHARED_METADATA_KEY))
+    return check_shared_freshness(
+        source_observed_at=metadata.source_observed_at if metadata else None,
+        last_success_at=metadata.last_success_at if metadata else None,
+        now=now,
+        next_deadline=next_deadline,
+    )
 
 
 async def read_shared_catalog(

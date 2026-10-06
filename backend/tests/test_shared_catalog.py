@@ -223,16 +223,16 @@ async def test_migration_applies_from_an_empty_database(
 
 async def test_shared_round_trip_target_counts_and_idempotent_replay(
     migrated_test_engine,
+    publication_settings,
 ) -> None:
     envelope = load_shared_envelope()
     first_publication = publication()
     session_factory = create_session_factory(migrated_test_engine)
 
+    first_version = await publish_shared_catalog(
+        session_factory, envelope, first_publication, settings=publication_settings
+    )
     async with session_factory() as session:
-        first_version = await publish_shared_catalog(
-            session, envelope, first_publication
-        )
-        await session.commit()
         stored = await read_shared_catalog(session, first_publication.season_id)
         target = await read_target_gameweek_context(
             session,
@@ -266,23 +266,22 @@ async def test_shared_round_trip_target_counts_and_idempotent_replay(
         )
         assert target.fixture_counts_by_team == {1: 1, 5: 1, 7: 0}
 
-        second_version = await publish_shared_catalog(
-            session, envelope, first_publication
-        )
-        await session.commit()
+    second_version = await publish_shared_catalog(
+        session_factory, envelope, first_publication, settings=publication_settings
+    )
 
-        changed_payload = load_json_fixture("bootstrap_static.json")
-        changed_payload["elements"][0]["now_cost"] = 62
-        changed_envelope = SharedCatalogEnvelope.model_validate(
-            {
-                "bootstrap": changed_payload,
-                "fixtures": load_json_fixture("fixtures.json"),
-            }
-        )
-        changed_version = await publish_shared_catalog(
-            session, changed_envelope, publication(observed_hour=9)
-        )
-        await session.commit()
+    changed_payload = load_json_fixture("bootstrap_static.json")
+    changed_payload["elements"][0]["now_cost"] = 62
+    changed_envelope = SharedCatalogEnvelope.model_validate(
+        {
+            "bootstrap": changed_payload,
+            "fixtures": load_json_fixture("fixtures.json"),
+        }
+    )
+    changed_version = await publish_shared_catalog(
+        session_factory, changed_envelope, publication(observed_hour=9),
+        settings=publication_settings,
+    )
 
     async with session_factory() as session:
         updated = await read_shared_catalog(session, first_publication.season_id)
@@ -318,17 +317,17 @@ async def test_shared_round_trip_target_counts_and_idempotent_replay(
 
 async def test_validation_and_write_failure_preserve_previous_publication(
     migrated_test_engine,
+    publication_settings,
     monkeypatch,
 ) -> None:
     season_id = "2027-28"
     baseline_envelope = load_shared_envelope()
     session_factory = create_session_factory(migrated_test_engine)
 
-    async with session_factory() as session:
-        await publish_shared_catalog(
-            session, baseline_envelope, publication(season_id=season_id)
-        )
-        await session.commit()
+    await publish_shared_catalog(
+        session_factory, baseline_envelope, publication(season_id=season_id),
+        settings=publication_settings,
+    )
 
     invalid_fixtures = load_json_fixture("fixtures.json")
     invalid_fixtures[1]["team_a"] = 999
@@ -363,14 +362,13 @@ async def test_validation_and_write_failure_preserve_previous_publication(
         "_write_fixture_rows",
         fail_after_first_fixture_write,
     )
-    async with session_factory() as session:
-        with pytest.raises(RuntimeError, match="simulated fixture write failure"):
-            await publish_shared_catalog(
-                session,
-                changed_envelope,
-                publication(season_id=season_id, observed_hour=9),
-            )
-        await session.rollback()
+    with pytest.raises(RuntimeError, match="simulated fixture write failure"):
+        await publish_shared_catalog(
+            session_factory,
+            changed_envelope,
+            publication(season_id=season_id, observed_hour=9),
+            settings=publication_settings,
+        )
 
     async with session_factory() as session:
         preserved = await read_shared_catalog(session, season_id)
@@ -396,6 +394,7 @@ async def test_validation_and_write_failure_preserve_previous_publication(
 
 async def test_target_counts_preserve_a_double_gameweek(
     migrated_test_engine,
+    publication_settings,
 ) -> None:
     fixture_payload = load_json_fixture("fixtures.json")
     second_target_fixture = deepcopy(fixture_payload[0])
@@ -422,9 +421,11 @@ async def test_target_counts_preserve_a_double_gameweek(
     season_id = "2028-29"
     session_factory = create_session_factory(migrated_test_engine)
 
+    await publish_shared_catalog(
+        session_factory, envelope, publication(season_id=season_id),
+        settings=publication_settings,
+    )
     async with session_factory() as session:
-        await publish_shared_catalog(session, envelope, publication(season_id=season_id))
-        await session.commit()
         target = await read_target_gameweek_context(
             session,
             season_id,

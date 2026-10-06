@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     )
 
     database_url: AsyncPostgresUrl
+    # Must address the same database using a direct or session-mode endpoint.
+    session_database_url: AsyncPostgresUrl | None = None
 
 
 @lru_cache

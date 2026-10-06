@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
 import pytest_asyncio
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import text
@@ -48,6 +49,13 @@ def create_guarded_test_engine(test_settings: DatabaseTestSettings | None = None
     return create_database_engine(
         Settings(database_url=resolved_settings.test_database_url)
     )
+
+
+@pytest.fixture
+def publication_settings(test_engine):
+    """Use the guarded disposable database for both independent connections."""
+    url = test_engine.url.render_as_string(hide_password=False)
+    return Settings(database_url=url, session_database_url=url)
 
 
 @pytest_asyncio.fixture(scope="session")
