@@ -21,9 +21,12 @@ def _parse_nullable_numeric_string(value: object) -> Decimal | None:
     if not isinstance(value, str):
         raise ValueError("FPL numeric value must be a string or null")
     try:
-        return Decimal(value)
+        parsed = Decimal(value)
     except InvalidOperation as error:
         raise ValueError("FPL numeric string is not a valid decimal") from error
+    if not parsed.is_finite():
+        raise ValueError("FPL numeric string must be finite")
+    return parsed
 
 
 def require_aware_datetime(value: datetime) -> datetime:

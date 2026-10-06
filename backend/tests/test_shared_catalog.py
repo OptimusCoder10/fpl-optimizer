@@ -192,7 +192,13 @@ async def test_migration_applies_from_an_empty_database(
                 table_name: inspect(sync_connection)
                 .get_pk_constraint(table_name)
                 .get("constrained_columns")
-                for table_name in ("teams", "players", "gameweeks", "fixtures")
+            for table_name in (
+                "teams",
+                "players",
+                "gameweeks",
+                "fixtures",
+                "player_fixture_history",
+            )
             }
         )
         fixture_columns = await connection.run_sync(
@@ -208,6 +214,7 @@ async def test_migration_applies_from_an_empty_database(
         "fixtures",
         "gameweeks",
         "players",
+        "player_fixture_history",
         "seasons",
         "teams",
     }
@@ -216,6 +223,7 @@ async def test_migration_applies_from_an_empty_database(
         "players": ["season_id", "id"],
         "gameweeks": ["season_id", "id"],
         "fixtures": ["season_id", "id"],
+        "player_fixture_history": ["season_id", "player_id", "fixture_id"],
     }
     assert fixture_columns["gameweek_id"] is True
     assert fixture_columns["kickoff_time"] is True
