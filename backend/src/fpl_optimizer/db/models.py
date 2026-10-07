@@ -377,3 +377,4 @@ class CacheMetadata(Base):
     retry_count: Mapped[int | None] = mapped_column(Integer)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     history_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_provenance: Mapped[dict | None] = mapped_column(JSON)
