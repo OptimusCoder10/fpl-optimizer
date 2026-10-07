@@ -376,3 +376,4 @@ class CacheMetadata(Base):
     last_error_category: Mapped[str | None] = mapped_column(String(64))
     retry_count: Mapped[int | None] = mapped_column(Integer)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    history_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

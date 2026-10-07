@@ -411,7 +411,11 @@ async def read_player_history(
     history_metadata = await session.get(
         CacheMetadata, (season_id, HISTORY_METADATA_KEY)
     )
-    if checkpoint is None or history_metadata is None:
+    if (
+        checkpoint is None
+        or checkpoint.last_success_at is None
+        or history_metadata is None
+    ):
         return None
     rows = tuple(
         (
