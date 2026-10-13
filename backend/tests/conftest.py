@@ -46,6 +46,9 @@ def create_guarded_test_engine(test_settings: DatabaseTestSettings | None = None
             "TEST_DATABASE_URL must target a database whose name ends in '_test'"
         )
 
+    if database_url.host not in {"localhost", "127.0.0.1", "::1"}:
+        raise RuntimeError("TEST_DATABASE_URL must target a local loopback host")
+
     return create_database_engine(
         Settings(database_url=resolved_settings.test_database_url)
     )

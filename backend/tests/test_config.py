@@ -6,6 +6,30 @@ from pydantic import ValidationError
 from fpl_optimizer.config import Settings
 
 
+@pytest.mark.parametrize("origin", [
+    "*", "https://*.example", "https://example/path", "https://example/",
+    "https://user:pw@example", "https://example?q=1", "https://example#fragment",
+    "https://example:99999", "null", "https://one,https://two",
+])
+def test_frontend_origin_rejects_non_origins(origin):
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            database_url="postgresql+asyncpg://dummy:dummy@localhost/dummy_test",
+            frontend_origin=origin,
+        )
+
+
+@pytest.mark.parametrize("origin", ["", "https://frontend.example", "http://localhost:3000"])
+def test_frontend_origin_accepts_empty_or_one_exact_origin(origin):
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://dummy:dummy@localhost/dummy_test",
+        frontend_origin=origin,
+    )
+    assert settings.frontend_origin == origin
+
+
 def test_additional_ca_is_optional_and_loaded_from_environment(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("DATABASE_SSL_CA_FILE", raising=False)
     assert Settings(

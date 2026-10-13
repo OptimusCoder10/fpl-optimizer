@@ -29,6 +29,17 @@ def test_non_test_database_is_rejected_before_engine_creation() -> None:
     engine_factory.assert_not_called()
 
 
+def test_remote_test_database_is_rejected_before_engine_creation() -> None:
+    settings = DatabaseTestSettings(
+        _env_file=None,
+        test_database_url="postgresql+asyncpg://dummy:dummy@remote.example/db_test",
+    )
+    with patch("conftest.create_database_engine") as engine_factory:
+        with pytest.raises(RuntimeError, match="local loopback"):
+            create_guarded_test_engine(settings)
+    engine_factory.assert_not_called()
+
+
 @pytest.mark.parametrize("host", ["db.example.com", "localhost.example.com"])
 def test_remote_database_uses_certificate_verifying_tls(host: str) -> None:
     settings = Settings(

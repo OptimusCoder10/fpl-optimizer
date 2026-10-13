@@ -77,6 +77,96 @@ the future material-context digest used for manager reconfirmation.
 HTTP ingestion, Actions scheduling, broader history generation/eligibility gates,
 lineup-specific age allowances and the context API are still pending.
 
+## Minimal backend and Render settings (Phase 1B step 2)
+
+FastAPI provides the health routes; Uvicorn serves the app with one worker.
+Run locally from `backend/`, after installing the locked dependencies:
+
+```bash
+.venv/bin/uvicorn fpl_optimizer.main:create_app --factory --host 127.0.0.1 --port 8000 --workers 1
+.venv/bin/python -m fpl_optimizer.services.solver_smoke
+```
+
+- `GET /health/live`: process response only, HTTP 200.
+- `GET /health/ready`: a read-only `SELECT 1` through the existing verified-TLS
+  engine (two-second check limit), plus the startup CBC proof. HTTP 200 when both
+  succeed, otherwise HTTP 503 with fixed safe statuses. Driver exceptions and
+  configuration values are never returned or logged by these checks.
+- CBC runs once at startup in a separate process, with a two-second CBC limit
+  and a five-second outer wall limit. Timeout/cancellation kills the process group,
+  including CBC. Readiness polls reuse that result instead of starting more solves.
+  Restart the service to retry a failed startup proof. CBC uses its default serial
+  mode: explicitly requesting an internal thread produced intermittent local
+  unproven/over-budget results; serial mode passed 20 repeated bounded proofs.
+- The proof maximizes `6x + 4y + 3z`, subject to `4x + 3y + 2z <= 5`, with binary
+  variables. It requires both PuLP's optimal problem and optimal solution statuses,
+  then independently checks the unique answer `(0, 1, 1)`, objective **7**.
+- Readiness establishes runtime connectivity and solver execution, not populated
+  FPL data, prediction availability or the future context API's freshness gates.
+- `FRONTEND_ORIGIN` permits exactly one HTTP(S) origin without a trailing slash.
+  Empty means no cross-origin access. The current routes permit only GET; requests
+  without an Origin header still work for health probes.
+
+These are **documented dashboard settings**, not an existing Render deployment:
+
+| Setting | Value |
+|---|---|
+| Service type / runtime | Web Service / Python 3 |
+| Root directory | `backend` |
+| Python version | **3.14.7**, explicitly selected with `PYTHON_VERSION` |
+| uv version | **0.12.19**, explicitly selected with `UV_VERSION` |
+| Build command | `uv sync --frozen --no-dev --no-python-downloads && .venv/bin/python -m fpl_optimizer.services.solver_smoke` |
+| Start command | `.venv/bin/uvicorn fpl_optimizer.main:create_app --factory --host 0.0.0.0 --port $PORT --workers 1` |
+| Health check path | `/health/ready` |
+| Automatic deploys | Disabled for this manual proof; CI-gated releases remain future work |
+| Plan / region | Owner selects when provisioning; not chosen or verified here |
+
+Environment variable **names only**: `PYTHON_VERSION`, `UV_VERSION`, `DATABASE_URL`,
+`DATABASE_SSL_CA_FILE`, `FRONTEND_ORIGIN`. Render supplies `PORT`.
+`SESSION_DATABASE_URL` is additionally required for separate online Alembic and
+ingestion commands; the health app itself neither migrates nor ingests. Never put
+`TEST_DATABASE_URL` on Render. Supply actual database/origin values privately in the
+dashboard. Do not run migrations in this build/start command.
+
+[Render's current Python documentation](https://render.com/docs/python-version)
+says any released version from 3.7.3 onward is supported, and
+[Python 3.14.7 was released on August 5, 2026](https://www.python.org/downloads/release/python-3147/).
+Thus the exact pin is supported according to documentation; actual hosted execution
+is still unproved. The repository pin remains unchanged. If Render rejects it,
+stop and report the build result: the owner must choose a supported replacement
+pin (a separate runtime-change task) or a Docker deploy that supplies 3.14.7.
+[Render health checks](https://render.com/docs/health-checks) require a successful
+HTTP response within five seconds; using readiness also means a database outage
+can cause Render to stop traffic and eventually restart the service.
+
+**CBC installation is verified for this package, not assumed.** `uv.lock` pins
+**PuLP 3.3.0** and its wheel checksum. The installed wheel actually contains CBC
+executables for Linux `i64`, `i32` and `arm64`; `PULP_CBC_CMD` selects the package's
+binary without relying on a system `cbc`. The inspected Linux `i64` executable
+reports **CBC 2.10.3**, SHA-256
+`2e17077752aa52b06385ad248c9e90bb4f1ce34038c34c94e1012ca6adea5cc7`.
+Its ordinary Linux runtime library dependencies resolve locally, and the actual
+solve passes locally. Installing the frozen lock therefore supplies CBC; no apt
+install or root permission is planned. The build proof fails if Render's architecture,
+libraries or executable permissions are incompatible; startup checks again in the
+runtime environment. This packaging claim is specific to
+[PuLP 3.3.0](https://pypi.org/project/PuLP/3.3.0/); reevaluate it before upgrading.
+
+**Proposed CA delivery:** paste the project's public Supabase CA PEM into a
+[Render secret file](https://render.com/docs/configure-environment-variables#secret-files)
+and privately set `DATABASE_SSL_CA_FILE` to its `/etc/secrets/<filename>` path.
+This uses the existing file setting without a code change; no inline PEM environment
+setting was added. Both remote engines retain `CERT_REQUIRED`, hostname verification
+and the already-authorized explicit-CA strict-bit compatibility policy described
+above. A missing/invalid file makes readiness fail safely. Never substitute an
+unverified connection. Keep the actual file/path and connection values out of Git.
+
+After the owner deploys: check both health paths, confirm readiness shows database
+available and solver `optimal`, objective 7, selection `[0, 1, 1]`; verify CORS from
+the intended frontend and another origin. Record Render's actual Python/CBC versions
+and cold/warm behavior. No hosted application, TLS/CBC execution, provisioning or
+deployment outcome is claimed by these local checks.
+
 ## Pinned prior-season archive (slice 1.5)
 
 The offline data-layer API imports the four local files from commit

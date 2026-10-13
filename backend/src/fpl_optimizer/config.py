@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from pydantic import BeforeValidator, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,6 +52,32 @@ class Settings(BaseSettings):
     session_database_url: AsyncPostgresUrl | None = None
     # Additional trusted PEM CA for both remote write and session connections.
     database_ssl_ca_file: Path | None = None
+    frontend_origin: str = ""
+
+    @field_validator("frontend_origin")
+    @classmethod
+    def validate_frontend_origin(cls, value: str) -> str:
+        """Allow one explicit HTTP(S) origin; an empty value denies CORS."""
+        value = value.strip()
+        if not value:
+            return ""
+        origin = urlsplit(value)
+        if (
+            origin.scheme not in {"http", "https"}
+            or not origin.hostname
+            or origin.username is not None
+            or origin.password is not None
+            or origin.path
+            or origin.query
+            or origin.fragment
+            or "*" in value
+            or any(character.isspace() for character in value)
+            or "," in value
+        ):
+            raise ValueError("FRONTEND_ORIGIN must be one HTTP(S) origin without a path")
+        # Accessing port also rejects malformed/out-of-range ports.
+        origin.port
+        return value
 
     @field_validator("database_ssl_ca_file", mode="before")
     @classmethod
