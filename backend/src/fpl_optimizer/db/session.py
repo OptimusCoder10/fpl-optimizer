@@ -29,6 +29,12 @@ def _prepare_database_connection(settings: Settings) -> tuple[URL, ssl.SSLContex
     ssl_context = None
     if host not in LOCAL_DATABASE_HOSTS:
         ssl_context = ssl.create_default_context()
+        if settings.database_ssl_ca_file is not None:
+            ssl_context.load_verify_locations(cafile=str(settings.database_ssl_ca_file))
+            # Supabase's 2021 intermediate CA omits Key Usage. Allow its legacy
+            # encoding only with an explicitly configured CA; chain/signature
+            # and hostname verification remain required. See HANDOFF.md.
+            ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
 
     return sanitized_url, ssl_context
 

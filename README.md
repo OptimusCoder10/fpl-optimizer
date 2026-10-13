@@ -48,12 +48,22 @@ The lock opens its own connection with SQLAlchemy's `NullPool` (no local connect
 reuse), separately from the write transaction, and closes it after releasing the
 lock. Both connection paths retain the existing remote TLS verification.
 
+If the provider requires an additional trusted CA, set `DATABASE_SSL_CA_FILE`
+to the absolute path of its PEM CA certificate; an empty value is treated as unset.
+Both remote connection paths
+load it alongside the system trust store, preserving certificate and hostname
+verification. An unreadable or invalid CA file stops engine creation; verification
+is never disabled as a fallback. Local disposable connections do not use this file.
+Only contexts with this explicit CA setting clear `VERIFY_X509_STRICT`, because
+the Supabase 2021 intermediate CA omits Key Usage. Chain/signature and hostname
+verification remain enabled; all other default verification flags are preserved.
+
 `publish_shared_catalog` takes a session factory and validated inputs, owns the
 commit/rollback, and returns the publication version or `None` after logging
 “already running”. The reusable `ingestion_lock` context uses one stable key for
 the database; future ingestion commands must hold it around their entire run,
-and future migration integration must use the same helper and stop on contention.
-Alembic does not acquire this lock yet.
+and online Alembic commands use the same lock and stop on contention. Both paths
+verify the actual lock and write connections reach the same database before writing.
 
 `read_shared_freshness` evaluates the last committed shared publication with
 explicit timezone-aware `now` and a strictly future `next_deadline`. It returns

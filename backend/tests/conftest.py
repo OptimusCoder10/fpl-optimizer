@@ -78,6 +78,7 @@ async def migrated_test_engine(test_engine):
 
     environment = os.environ.copy()
     environment["DATABASE_URL"] = DatabaseTestSettings().test_database_url
+    environment["SESSION_DATABASE_URL"] = environment["DATABASE_URL"]
     result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=BACKEND_ROOT,

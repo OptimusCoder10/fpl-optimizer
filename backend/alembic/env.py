@@ -8,6 +8,7 @@ from sqlalchemy.engine import Connection
 
 from fpl_optimizer.db.base import Base
 from fpl_optimizer.db import models  # noqa: F401  # Register tables in metadata.
+from fpl_optimizer.db.advisory_lock import ingestion_lock, require_same_database
 from fpl_optimizer.db.session import create_database_engine
 
 
@@ -48,11 +49,18 @@ def do_run_migrations(connection: Connection) -> None:
 async def run_async_migrations() -> None:
     """Create an async engine and bridge it to Alembic's migration runner."""
     connectable = create_database_engine()
-
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
+    try:
+        async with ingestion_lock() as lock_connection:
+            if lock_connection is None:
+                raise RuntimeError("Ingestion already running; migration refused")
+            async with connectable.connect() as connection:
+                await require_same_database(lock_connection, connection)
+                # The identity SELECT starts an implicit transaction. End it
+                # before Alembic takes ownership of its migration transaction.
+                await connection.rollback()
+                await connection.run_sync(do_run_migrations)
+    finally:
+        await connectable.dispose()
 
 
 def run_migrations_online() -> None:

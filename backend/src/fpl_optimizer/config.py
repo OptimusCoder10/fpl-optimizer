@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import BeforeValidator, SecretStr
+from pydantic import BeforeValidator, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     database_url: AsyncPostgresUrl
     # Must address the same database using a direct or session-mode endpoint.
     session_database_url: AsyncPostgresUrl | None = None
+    # Additional trusted PEM CA for both remote write and session connections.
+    database_ssl_ca_file: Path | None = None
+
+    @field_validator("database_ssl_ca_file", mode="before")
+    @classmethod
+    def empty_ca_file_is_unset(cls, value: object) -> object:
+        """An empty environment-example placeholder uses the default TLS path."""
+        return None if value == "" else value
 
 
 @lru_cache

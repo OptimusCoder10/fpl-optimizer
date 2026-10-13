@@ -6,6 +6,20 @@ from pydantic import ValidationError
 from fpl_optimizer.config import Settings
 
 
+def test_additional_ca_is_optional_and_loaded_from_environment(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_SSL_CA_FILE", raising=False)
+    assert Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://user:password@localhost/database",
+    ).database_ssl_ca_file is None
+    ca_file = tmp_path / "provider-ca.pem"
+    monkeypatch.setenv("DATABASE_SSL_CA_FILE", str(ca_file))
+    assert Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://user:password@localhost/database",
+    ).database_ssl_ca_file == ca_file
+
+
 def test_settings_accept_async_postgres_url() -> None:
     settings = Settings(
         database_url="postgresql+asyncpg://user:password@localhost/database"

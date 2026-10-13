@@ -1,8 +1,10 @@
 """Shared lock ownership, failure cleanup and deterministic freshness gates."""
 
 import asyncio
+import os
+import sys
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -10,7 +12,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text
 
-from conftest import DatabaseTestSettings, create_guarded_test_engine
+from conftest import BACKEND_ROOT, DatabaseTestSettings, create_guarded_test_engine
 from fpl_optimizer.config import Settings
 
 from fpl_optimizer.db.advisory_lock import INGESTION_LOCK_KEY, ingestion_lock
@@ -23,6 +25,69 @@ from test_shared_catalog import load_shared_envelope, publication
 
 NOW = datetime(2026, 10, 6, 15, tzinfo=timezone.utc)
 TICK = timedelta(microseconds=1)
+
+
+async def run_test_migration(write_engine, lock_engine):
+    """Run Alembic only against the guarded local test engines."""
+    environment = os.environ.copy()
+    for name, engine in (("DATABASE_URL", write_engine), ("SESSION_DATABASE_URL", lock_engine)):
+        assert engine.url.host in {"localhost", "127.0.0.1", "::1"}
+        assert engine.url.database.endswith("_test")
+        environment[name] = engine.url.render_as_string(hide_password=False)
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "alembic", "upgrade", "head",
+        cwd=BACKEND_ROOT, env=environment,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+    return process.returncode, (stdout + stderr).decode()
+
+
+@pytest.mark.database
+async def test_migration_refuses_ingestion_contention(migrated_test_engine, publication_settings):
+    async with migrated_test_engine.connect() as connection:
+        before = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+    async with ingestion_lock(publication_settings) as acquired:
+        assert acquired is not None
+        code, output = await run_test_migration(migrated_test_engine, migrated_test_engine)
+    assert code != 0
+    assert "Ingestion already running; migration refused" in output
+    async with migrated_test_engine.connect() as connection:
+        assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == before
+
+
+@pytest.mark.database
+async def test_migration_refuses_database_mismatch(migrated_test_engine, other_test_engine):
+    code, output = await run_test_migration(migrated_test_engine, other_test_engine)
+    assert code != 0
+    assert "same PostgreSQL database; publication refused" in output
+    async with ingestion_lock(Settings(
+        database_url=other_test_engine.url.render_as_string(hide_password=False),
+        session_database_url=other_test_engine.url.render_as_string(hide_password=False),
+    )) as acquired:
+        assert acquired is not None
+
+
+async def test_session_lock_engine_receives_additional_ca(tmp_path):
+    ca_file = tmp_path / "provider-ca.pem"
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://user:password@write.example.com/database",
+        session_database_url="postgresql+asyncpg://user:password@session.example.com/database",
+        database_ssl_ca_file=ca_file,
+    )
+    connection = AsyncMock()
+    connection.scalar.return_value = False
+    engine = Mock()
+    engine.connect = AsyncMock(return_value=connection)
+    engine.dispose = AsyncMock()
+    with patch("fpl_optimizer.db.advisory_lock.create_database_engine", return_value=engine) as factory:
+        async with ingestion_lock(settings) as acquired:
+            assert acquired is None
+    lock_settings = factory.call_args.args[0]
+    assert lock_settings.database_url == settings.session_database_url
+    assert lock_settings.database_ssl_ca_file == ca_file
+    assert factory.call_args.kwargs["pooled"] is False
 
 
 @pytest_asyncio.fixture
