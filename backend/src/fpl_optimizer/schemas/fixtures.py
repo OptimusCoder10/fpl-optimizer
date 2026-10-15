@@ -9,6 +9,29 @@ from fpl_optimizer.schemas.bootstrap import (
     require_aware_datetime,
 )
 
+# Explicit season policy; adding a season requires reviewing its competition size.
+SEASON_CLUB_COUNTS = {"2026-27": 20}
+
+
+class IncompleteFixtures(ValueError):
+    """A structurally valid response does not contain a full season."""
+
+
+def validate_full_season(
+    season_id: str, bootstrap: BootstrapEnvelope, fixtures: "FixturesEnvelope",
+) -> "SharedCatalogEnvelope":
+    """HTTP publication gate; reduced offline samples are not full seasons."""
+    expected_clubs = SEASON_CLUB_COUNTS[season_id]
+    clubs = {team.id for team in bootstrap.teams}
+    pairs = [(fixture.team_h, fixture.team_a) for fixture in fixtures.root]
+    if (
+        len(clubs) != expected_clubs
+        or len(pairs) != expected_clubs * (expected_clubs - 1)
+        or set(pairs) != {(home, away) for home in clubs for away in clubs if home != away}
+    ):
+        raise IncompleteFixtures("incomplete_fixtures")
+    return SharedCatalogEnvelope(bootstrap=bootstrap, fixtures=fixtures)
+
 
 class FPLFixture(BootstrapBoundaryModel):
     """Every fixture field consumed by the shared catalog."""

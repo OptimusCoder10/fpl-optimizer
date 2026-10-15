@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
 
-from pydantic import BeforeValidator, SecretStr, field_validator
+from pydantic import BeforeValidator, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # Additional trusted PEM CA for both remote write and session connections.
     database_ssl_ca_file: Path | None = None
     frontend_origin: str = ""
+    fpl_season_id: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+    fpl_rules_version: str | None = Field(default=None, min_length=1, max_length=64)
+    fpl_run_budget_seconds: float = Field(default=660, gt=0, allow_inf_nan=False)
+    fpl_history_budget_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
 
     @field_validator("frontend_origin")
     @classmethod

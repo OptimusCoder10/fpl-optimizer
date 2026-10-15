@@ -219,3 +219,46 @@ The detailed project specification is maintained privately in the local `docs/sp
 ## License
 
 TBD
+
+### Manual FPL ingestion (Task 4a)
+
+The ingestion command uses the existing verified-TLS database settings and requires
+`SESSION_DATABASE_URL` to address the same database through a direct/session endpoint.
+Set `FPL_SEASON_ID` and `FPL_RULES_VERSION` explicitly in the environment. The season
+must have a reviewed entry in `SEASON_CLUB_COUNTS` (currently `2026-27`); fixture
+completeness requires every ordered pair of its clubs exactly once. Postponed
+fixtures with null event/kickoff count toward that total.
+
+From `backend`, run:
+
+```bash
+uv run --frozen python -m fpl_optimizer.ingest
+```
+
+This command makes real public FPL requests when deliberately invoked. Task 4a was
+verified using fake HTTP responses only. It holds the ingestion advisory lock
+through fetching and all publication work; a contender logs `already running`
+and exits without writes. Bootstrap and fixtures publish together when due
+(every four hours, or thirty minutes in the final day before the next deadline).
+Pending/due player histories resume even when no shared refresh is due.
+
+`FPL_RUN_BUDGET_SECONDS` defaults to 660; `FPL_HISTORY_BUDGET_SECONDS` defaults to
+600 and is capped by the remaining run budget. Requests have finite connection,
+read and total timeouts. Player requests are sequential, with at least 200ms
+between attempts. Transient network failures, HTTP 429 and 5xx receive at most
+three attempts with backoff/jitter and Retry-After support. An excessive wait
+ends the run cleanly; committed player checkpoints survive for the next run.
+
+Logs contain fixed categories and counts, without upstream bodies or credentials.
+Invalid/incomplete shared responses preserve the last good catalog and success
+time; failed attempts are recorded separately on an existing shared checkpoint.
+Before the first trusted publication, failures are logged without creating a
+season or success checkpoint. Exit code 1 means failure or partial player failure;
+lock contention and a clean budget stop exit 0. Scheduling and archives are still
+separate work. The existing runner's daily due times remain in use; sweep generations
+and broader coverage eligibility remain deferred as recorded in `HANDOFF.md`.
+
+Manager HTTP imports use `fetch_manager_import` with captured catalog deadlines
+and a client bounded to the caller's import budget. Only successful, fully read,
+validated responses become complete evidence. A failed/truncated transfers fetch
+never becomes an empty list; latest/GW1 picks are reused when they are the same event.

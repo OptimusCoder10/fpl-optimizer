@@ -3,7 +3,7 @@
 Checkpoint keys themselves are the required-ID set: discovery only adds keys.
 Success is due again after 24 hours; explicit sweep generations and dependency
 invalidation are deferred. Fetchers perform no database work and must return a
-fresh complete envelope (HTTP and its timeout/retry policy belong to a later slice).
+fresh complete envelope; the HTTP adapter supplies safe failure categories.
 """
 
 from collections.abc import Awaitable, Callable
@@ -21,6 +21,7 @@ from fpl_optimizer.config import Settings
 from fpl_optimizer.db.advisory_lock import ingestion_lock, require_same_database
 from fpl_optimizer.db.models import CacheMetadata, Player
 from fpl_optimizer.schemas.bootstrap import require_aware_datetime
+from fpl_optimizer.schemas.fetch import FetchFailure
 from fpl_optimizer.schemas.element_summary import (
     ElementSummaryEnvelope,
     PlayerHistoryPublication,
@@ -115,132 +116,155 @@ async def populate_history(
     if budget < timedelta(0):
         raise ValueError("history budget must be nonnegative")
     started = elapsed_clock()
-    now = _utc(clock())
     async with ingestion_lock(settings) as lock_connection:
         if lock_connection is None:
             logger.info("Shared ingestion already running")
             return None
+        return await _populate_history_locked(
+            session_factory, season_id, fetcher, lock_connection=lock_connection,
+            clock=clock, budget=budget, elapsed_clock=elapsed_clock, started=started,
+        )
+
+
+async def _populate_history_locked(
+    session_factory, season_id, fetcher, *, lock_connection,
+    clock, budget, elapsed_clock=monotonic, started=None,
+) -> PopulationResult:
+    """Existing runner under a caller-held ingestion lock (no nested acquisition)."""
+    if budget < timedelta(0):
+        raise ValueError("history budget must be nonnegative")
+    if started is None:
+        started = elapsed_clock()
+    now = _utc(clock())
+    async with session_factory.begin() as session:
+        await require_same_database(lock_connection, await session.connection())
+        await _discover_required_players(session, season_id, now)
+
+    async with session_factory() as session:
+        due = func.greatest(
+            CacheMetadata.history_due_at, CacheMetadata.next_retry_at,
+        )
+        numeric_id = cast(func.substr(
+            CacheMetadata.key, len(player_history.PLAYER_HISTORY_KEY_PREFIX) + 1,
+        ), Integer)
+        work = (await session.scalars(
+            _player_checkpoints(season_id)
+            .where(due <= _utc(clock()))
+            .order_by(due, numeric_id)
+        )).all()
+
+    succeeded = failed = 0
+    budget_exhausted = False
+    for checkpoint in work:
+        if elapsed_clock() - started >= budget.total_seconds():
+            budget_exhausted = True
+            break
+        player_id = _player_id(checkpoint)
+        attempted_at = _utc(clock())
         async with session_factory.begin() as session:
             await require_same_database(lock_connection, await session.connection())
-            await _discover_required_players(session, season_id, now)
-
-        async with session_factory() as session:
-            due = func.greatest(
-                CacheMetadata.history_due_at, CacheMetadata.next_retry_at,
+            await session.execute(
+                update(CacheMetadata)
+                .where(
+                    CacheMetadata.season_id == season_id,
+                    CacheMetadata.key == checkpoint.key,
+                )
+                .values(last_attempt_at=attempted_at)
             )
-            numeric_id = cast(func.substr(
-                CacheMetadata.key, len(player_history.PLAYER_HISTORY_KEY_PREFIX) + 1,
-            ), Integer)
-            work = (await session.scalars(
-                _player_checkpoints(season_id)
-                .where(due <= _utc(clock()))
-                .order_by(due, numeric_id)
-            )).all()
 
-        succeeded = failed = 0
-        budget_exhausted = False
-        for checkpoint in work:
-            if elapsed_clock() - started >= budget.total_seconds():
-                budget_exhausted = True
-                break
-            player_id = _player_id(checkpoint)
-            attempted_at = _utc(clock())
-            async with session_factory.begin() as session:
-                await require_same_database(lock_connection, await session.connection())
-                await session.execute(
-                    update(CacheMetadata)
-                    .where(
-                        CacheMetadata.season_id == season_id,
-                        CacheMetadata.key == checkpoint.key,
+        category = "fetch"
+        stop_run = False
+        try:
+            raw = await fetcher(player_id)
+            category = "validation"
+            envelope = ElementSummaryEnvelope.model_validate(raw)
+            publication = PlayerHistoryPublication(
+                season_id=season_id,
+                player_id=player_id,
+                # Provenance only, not a sweep completion/generation claim.
+                completed_sweep_id=f"population-{attempted_at.isoformat()}",
+                source_observed_at=attempted_at,
+                published_at=_utc(clock()),
+            )
+        except FetchFailure as error:
+            category = error.category
+            stop_run = error.stop_run
+            envelope = None
+        except Exception:
+            # Persist the safe category below; cancellation is a BaseException
+            # and intentionally bypasses this handler.
+            envelope = None
+        else:
+            async with session_factory() as session:
+                # Configuration/lock errors stop the run, not player retries.
+                await require_same_database(
+                    lock_connection, await session.connection(),
+                )
+                try:
+                    await player_history._write_player_history(
+                        session, envelope, publication,
                     )
-                    .values(last_attempt_at=attempted_at)
-                )
-
-            category = "fetch"
-            try:
-                raw = await fetcher(player_id)
-                category = "validation"
-                envelope = ElementSummaryEnvelope.model_validate(raw)
-                publication = PlayerHistoryPublication(
-                    season_id=season_id,
-                    player_id=player_id,
-                    # Provenance only, not a sweep completion/generation claim.
-                    completed_sweep_id=f"population-{attempted_at.isoformat()}",
-                    source_observed_at=attempted_at,
-                    published_at=_utc(clock()),
-                )
-            except Exception:
-                # Persist the safe category below; cancellation is a BaseException
-                # and intentionally bypasses this handler.
-                envelope = None
-            else:
-                async with session_factory() as session:
-                    # Configuration/lock errors stop the run, not player retries.
-                    await require_same_database(
-                        lock_connection, await session.connection(),
+                    await session.execute(
+                        update(CacheMetadata)
+                        .where(
+                            CacheMetadata.season_id == season_id,
+                            CacheMetadata.key == checkpoint.key,
+                        )
+                        .values(
+                            history_due_at=publication.published_at + REFRESH_INTERVAL,
+                            last_attempt_at=attempted_at,
+                        )
                     )
-                    try:
-                        await player_history._write_player_history(
-                            session, envelope, publication,
-                        )
-                        await session.execute(
-                            update(CacheMetadata)
-                            .where(
-                                CacheMetadata.season_id == season_id,
-                                CacheMetadata.key == checkpoint.key,
-                            )
-                            .values(
-                                history_due_at=publication.published_at + REFRESH_INTERVAL,
-                                last_attempt_at=attempted_at,
-                            )
-                        )
-                        await session.commit()
-                    except Exception as error:
-                        await session.rollback()
-                        category = (
-                            "validation" if isinstance(error, ValueError)
-                            else "publication"
-                        )
-                    else:
-                        succeeded += 1
-                        continue
+                    await session.commit()
+                except Exception as error:
+                    await session.rollback()
+                    category = (
+                        "validation" if isinstance(error, ValueError)
+                        else "publication"
+                    )
+                else:
+                    succeeded += 1
+                    continue
 
-            # Separate short transaction after rollback; never overwrite success,
-            # source time, coverage, rows, or publication versions on failure.
-            async with session_factory.begin() as session:
-                await require_same_database(lock_connection, await session.connection())
-                state = await session.get(CacheMetadata, (season_id, checkpoint.key))
-                state.retry_count = (state.retry_count or 0) + 1
-                delay = min(
-                    timedelta(minutes=30 * 2 ** min(state.retry_count - 1, 4)),
-                    timedelta(hours=6),
-                )
-                state.next_retry_at = _utc(clock()) + delay
-                state.last_error_category = category
-                # Never persist exception text, which may contain URLs/credentials.
-                state.last_error = f"Player history {category} failed"
-            failed += 1
+        # Separate short transaction after rollback; never overwrite success,
+        # source time, coverage, rows, or publication versions on failure.
+        async with session_factory.begin() as session:
+            await require_same_database(lock_connection, await session.connection())
+            state = await session.get(CacheMetadata, (season_id, checkpoint.key))
+            state.retry_count = (state.retry_count or 0) + 1
+            delay = min(
+                timedelta(minutes=30 * 2 ** min(state.retry_count - 1, 4)),
+                timedelta(hours=6),
+            )
+            state.next_retry_at = _utc(clock()) + delay
+            state.last_error_category = category
+            # Never persist exception text, which may contain URLs/credentials.
+            state.last_error = f"Player history {category} failed"
+        failed += 1
+        if stop_run:
+            budget_exhausted = True
+            break
 
-        async with session_factory() as session:
-            states = (await session.scalars(_player_checkpoints(season_id))).all()
-        ended_at = _utc(clock())
-        result = PopulationResult(
-            succeeded=succeeded,
-            failed=failed,
-            pending=sum(
-                state.last_success_at is None
-                or state.next_retry_at is not None
-                or state.history_due_at <= ended_at
-                for state in states
-            ),
-            required=len(states),
-            budget_exhausted=budget_exhausted,
-        )
-        logger.info(
-            "History population: success=%d failed=%d pending=%d required=%d",
-            result.succeeded, result.failed, result.pending, result.required,
-        )
-        return result
+    async with session_factory() as session:
+        states = (await session.scalars(_player_checkpoints(season_id))).all()
+    ended_at = _utc(clock())
+    result = PopulationResult(
+        succeeded=succeeded,
+        failed=failed,
+        pending=sum(
+            state.last_success_at is None
+            or state.next_retry_at is not None
+            or state.history_due_at <= ended_at
+            for state in states
+        ),
+        required=len(states),
+        budget_exhausted=budget_exhausted,
+    )
+    logger.info(
+        "History population: success=%d failed=%d pending=%d required=%d",
+        result.succeeded, result.failed, result.pending, result.required,
+    )
+    return result
 
 
 @dataclass(frozen=True)
