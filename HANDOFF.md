@@ -2,9 +2,9 @@
 
 This file tracks live build progress — what's actually done, not just what's planned. Read this before starting any task; update it before finishing one.
 
-## Current State — 2026-10-16
+## Current State — 2026-10-17
 
-Phase 1 data services through the scoped slice 1.6 and Task 4a HTTP/manual ingestion are implemented with synthetic HTTP tests; broader history eligibility, live-FPL probes and real-manager validation remain open. Task 4b adds the scheduled/manual Actions ingestion workflow, pending a real runner probe. Hosted Supabase migrations and rollback-only publication passed. Render's Singapore free instance built on Python 3.14.7, passed the serial CBC proof and returned 200 from both health routes with verified-TLS database readiness. Cold/warm health timings are recorded below. Actual frontend CORS, threaded CBC on Render and Actions CA/ingestion remain unverified.
+Phase 1 data services through the scoped slice 1.6 and Task 4a HTTP/manual ingestion are implemented with synthetic HTTP tests; broader history eligibility, live-FPL probes and real-manager validation remain open. Task 4b's scheduled/manual Actions ingestion has published shared data and resumed history across separate runner executions. Hosted Supabase migrations and rollback-only publication passed. Render's Singapore free instance built on Python 3.14.7, passed the serial CBC proof and returned 200 from both health routes with verified-TLS database readiness. Cold/warm health timings are recorded below. Actual frontend CORS and threaded CBC on Render remain unverified.
 
 ## Current Phase
 Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record is `docs/spec/AMENDMENTS.md`; §§01–12 define the contract. Slices 1.1–1.3, the owner-scoped portion of 1.4, 1.5 and the synthetic-only 1.6 service are implemented. The hosted database, migration and rollback-only publication proof passed, as did Render's Python/serial-CBC/TLS-health proof. Task 4a now wires HTTP/manual ingestion to those existing services. The checklist distinguishes remaining live-FPL/real-manager validation, history eligibility, CORS, Actions and threaded-CBC work.
@@ -33,7 +33,7 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [ ] validate 1.6 on real Free Hit, rebuy and late-joiner teams
 - [x] HTTP layer derives manager-response completeness from the fetch result; failed or truncated transfers never become a complete empty history (Task 4a, fake-transport proof).
 - [x] Task 4b: authored scheduled/manual GitHub Actions workflow for the existing ingestion command; local configuration review only.
-- [ ] Task 4b: inspect a real manually dispatched Actions run for CA/TLS connection and ingestion/checkpoint behavior across runner executions.
+- [x] Task 4b: inspect real Actions runs for CA/TLS connection and ingestion/checkpoint behavior across runner executions (owner-supplied logs; details below).
 - [ ] Phase 1B: run the suite on exactly Python 3.14.7.
 - [ ] Controlled real-FPL probes validate the same parsing/publication paths after saved-fixture tests pass
 - [x] Phase 1B step 1: verified-TLS Supabase session-pooler connection, hosted migrations/schema check and rollback-only advisory-lock publication proof (2026-10-13; details below)
@@ -45,9 +45,11 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [x] Phase 1B step 2: record measured cold and warm health timings on Render (app boot time and separate CBC timing were not captured)
 - [ ] Phase 1B CBC follow-up: re-test the undiagnosed failure with explicit threaded CBC on Render using only the synthetic proof; if it recurs, capture raw CBC stdout/stderr, problem/solution statuses, solver version/options and elapsed time. Keep the default serial mode until the cause is understood.
 - [x] Phase 1B Actions: runner-local CA file supplied; first real run connected and published through the configured certificate- and hostname-verifying connection path (owner-supplied log; no explicit "TLS verified" line).
+- [x] Phase 1B Actions: history ingestion resumes across separate runs; pending fell from 582 to 483 and the run-1 failed player recovered (owner-supplied logs).
 - [ ] Phase 1B Actions: measure aggregate per-player fetch versus commit duration in the count line without player names; compare projected full-sweep time with the §05B two-hour finalized-coverage grace.
+- [ ] Phase 1B Actions: revisit full-sweep duration after per-player timing is measured; at about 95 players per run and sparse scheduled starts, a sweep may take longer than the 24-hour due-again interval. Consider reducing per-player time or using a more reliable trigger.
 - [ ] Phase 1B / §09C: create a least-privilege ingestion database role separate from the runtime role, then use its session URL for Actions.
-- [ ] Phase 1B: remaining role/storage configuration, Actions ingestion that resumes across separate runs, and raw snapshot retention
+- [ ] Phase 1B: remaining role/storage configuration and raw snapshot retention
 - [ ] Phase 2: implement and test the §04D prior-selection order — previous-season same player → earlier current-season other same-position players → previous-season position pool; with no prior, use personal current observations alone without κ, otherwise report prediction unavailable.
 - [ ] Phase 2: capture pre-deadline forecast bundles once the predictor exists
 - [ ] Phase 4 / §07A: implement the one-solve admission slot; on timeout/cancellation stop the CBC child and release capacity in finally, with tests proving a subsequent request can acquire the slot
@@ -83,7 +85,7 @@ Things the next session should know before touching this code.
 - Shared publication now accepts a session factory and owns commit/rollback, rather than accepting a caller-owned session. Configure `SESSION_DATABASE_URL` explicitly with a direct/session endpoint to the same database as the write connection. The dedicated connection uses `NullPool`; this does not make an external transaction pooler safe. There is no automatic fallback to `DATABASE_URL`.
 - Publication now verifies the actual lock/write database destinations after acquiring the ingestion lock and before calling the writer. `ingestion_lock` yields its live connection (or `None` on contention); future command/migration integration must call `require_same_database` with that connection and the actual write connection before writing. The verification uses a fresh temporary advisory marker observed through PostgreSQL's lock view, not URL equality or privileged control-file access.
 - Future ingestion commands must hold `db.advisory_lock.ingestion_lock` around the entire run, including fetches and history work, then use short write transactions. Online Alembic commands now acquire that same stable `INGESTION_LOCK_KEY`, stop on contention and verify the actual lock/write database before migration operations. `SESSION_DATABASE_URL` is therefore required for online Alembic too. Do not nest the self-locking publication wrapper inside an already-held lock.
-- The slice 1.3 standalone history publisher acquires the ingestion advisory lock itself. The slice 1.4 `populate_history` service holds that lock for the entire run and calls the internal writer without nesting the standalone wrapper. Failed-attempt persistence and scheduling are now active. Task 4a adds the HTTP/CLI entry point; Actions remains unwired. The existing standalone runner and command share one loop; the command passes its held lock rather than nesting acquisition. Callers supply the fetcher, aware wall clock and explicit budget (normally 10 minutes), with an injectable monotonic elapsed clock.
+- The slice 1.3 standalone history publisher acquires the ingestion advisory lock itself. The slice 1.4 `populate_history` service holds that lock for the entire run and calls the internal writer without nesting the standalone wrapper. Failed-attempt persistence and scheduling are now active. Task 4a adds the HTTP/CLI entry point, and Task 4b invokes it from Actions. The existing standalone runner and command share one loop; the command passes its held lock rather than nesting acquisition. Callers supply the fetcher, aware wall clock and explicit budget (normally 10 minutes), with an injectable monotonic elapsed clock.
 - Pending `history/player/{id}` keys now exist without successful publications. Their required positive `publication_version=1` is a schema placeholder, not success evidence; readers must check `last_success_at`. `read_player_history` now returns `None` for these pending checkpoints. The global history version still advances only on successful publication.
 
 ## Phase 1A Verification
@@ -335,6 +337,14 @@ Pinned source: `vaastav/Fantasy-Premier-League`, season `2025-26`, commit `9779c
 ### First Real Actions Ingestion Run — 2026-10-16
 
 - **Tool: Codex (documentation of owner-supplied log).** Run succeeded in **10m41s**. Shared ingestion: success=1, failed=0, clubs=20, players=667, fixtures=380. History: success=85, failed=1, pending=582, required=667; the bounded history budget stopped further work. Pending players are expected on this first run.
-- The run connected and published with the runner-local CA file configured. Settings enforce certificate and hostname verification when that file is set. The log has no explicit "TLS verified" line; the successful publication is the operational evidence. The Actions CA item is checked. Resume across separate runners remains unchecked until a later run shows pending falling.
+- The run connected and published with the runner-local CA file configured. Settings enforce certificate and hostname verification when that file is set. The log has no explicit "TLS verified" line; the successful publication is the operational evidence. The Actions CA item is checked. A later run confirmed resume across separate runners; see below.
 - About 85 histories per 10-minute work budget is substantially slower than the 200ms courtesy pacing alone suggests. The cause is unknown; FPL response latency and database round trips are candidates, not findings. Measure aggregate fetch and commit durations in the count line without player names, then compare projected full-sweep time with §05B's two-hour finalized-coverage grace.
 - HANDOFF only; no code, workflow, test, commit or push.
+
+### Second Real Actions Ingestion Run — 2026-10-17
+
+- **Tool: Codex (documentation of owner-supplied log).** The scheduled run occurred about 4h27m after the manual run. Shared ingestion: success=1, failed=0, clubs=20, players=667, fixtures=380. History: success=99, failed=0, pending=483, required=667.
+- Pending fell from 582 to 483 across separate runner executions, proving persisted history checkpoints resume. The player that failed in run 1 recovered; run 2 reported failed=0.
+- The cron is configured for every 30 minutes, but only one scheduled run fired in about 4.5 hours after the push. GitHub documents that scheduled runs can be delayed or dropped ([GitHub event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)); treat Actions scheduling as best-effort.
+- At roughly 95 players per run and these sparse starts, a full sweep may exceed the 24-hour due-again interval. Measure per-player fetch and commit time before choosing between lowering per-player time and a more reliable trigger.
+- HANDOFF documentation only; no application code, workflow or tests changed. Commit requested by owner: `docs: record second Actions ingestion run (phase 1B)`.
