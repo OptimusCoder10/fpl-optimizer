@@ -44,7 +44,8 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [x] Phase 1B step 2: prove the hosted backend runs on exactly Python 3.14.7 (build log confirmed `PYTHON_VERSION`)
 - [x] Phase 1B step 2: record measured cold and warm health timings on Render (app boot time and separate CBC timing were not captured)
 - [ ] Phase 1B CBC follow-up: re-test the undiagnosed failure with explicit threaded CBC on Render using only the synthetic proof; if it recurs, capture raw CBC stdout/stderr, problem/solution statuses, solver version/options and elapsed time. Keep the default serial mode until the cause is understood.
-- [ ] Phase 1B Actions: supply the public CA PEM on the runner too, set DATABASE_SSL_CA_FILE to that runner-local file, and prove the same certificate/hostname-verifying connection path; neither the owner's local path nor Render's secret-file path exists on Actions
+- [x] Phase 1B Actions: runner-local CA file supplied; first real run connected and published through the configured certificate- and hostname-verifying connection path (owner-supplied log; no explicit "TLS verified" line).
+- [ ] Phase 1B Actions: measure aggregate per-player fetch versus commit duration in the count line without player names; compare projected full-sweep time with the §05B two-hour finalized-coverage grace.
 - [ ] Phase 1B / §09C: create a least-privilege ingestion database role separate from the runtime role, then use its session URL for Actions.
 - [ ] Phase 1B: remaining role/storage configuration, Actions ingestion that resumes across separate runs, and raw snapshot retention
 - [ ] Phase 2: implement and test the §04D prior-selection order — previous-season same player → earlier current-season other same-position players → previous-season position pool; with no prior, use personal current observations alone without κ, otherwise report prediction unavailable.
@@ -330,3 +331,10 @@ Pinned source: `vaastav/Fantasy-Premier-League`, season `2025-26`, commit `9779c
 - First real run may stop with histories pending because the history budget is bounded. A clean budget stop exits successfully and preserves committed player checkpoints; it is not an ingestion failure. Across subsequent healthy runs, expect the logged `pending` count to shrink as due players succeed. Inspect persistent pending or failed counts rather than treating the first run as a complete sweep.
 - Verified tags using `git ls-remote` against GitHub: `actions/checkout` `v7.0.1` resolves to `3d3c42e5aac5ba805825da76410c181273ba90b1`; `astral-sh/setup-uv` `v9.0.0` resolves to `c771a70e6277c0a99b617c7a806ffedaca235ff9`. Both match `.github/workflows/ingest.yml`. Neither tag returned a `^{}` peel line, so the direct tag ref was the commit checked.
 - HANDOFF and verification only; workflow, app code and tests unchanged. Actions CA/TLS remains unproved and its checkbox stays open. No commit or push.
+
+### First Real Actions Ingestion Run — 2026-10-16
+
+- **Tool: Codex (documentation of owner-supplied log).** Run succeeded in **10m41s**. Shared ingestion: success=1, failed=0, clubs=20, players=667, fixtures=380. History: success=85, failed=1, pending=582, required=667; the bounded history budget stopped further work. Pending players are expected on this first run.
+- The run connected and published with the runner-local CA file configured. Settings enforce certificate and hostname verification when that file is set. The log has no explicit "TLS verified" line; the successful publication is the operational evidence. The Actions CA item is checked. Resume across separate runners remains unchecked until a later run shows pending falling.
+- About 85 histories per 10-minute work budget is substantially slower than the 200ms courtesy pacing alone suggests. The cause is unknown; FPL response latency and database round trips are candidates, not findings. Measure aggregate fetch and commit durations in the count line without player names, then compare projected full-sweep time with §05B's two-hour finalized-coverage grace.
+- HANDOFF only; no code, workflow, test, commit or push.
