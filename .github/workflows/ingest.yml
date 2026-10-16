@@ -1,0 +1,57 @@
+name: Ingest FPL data
+
+on:
+  schedule:
+    # Offset from the hour to reduce contention with other scheduled workflows.
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# This repository targets one production database. Keep this group stable for
+# every scheduled and manually dispatched ingestion run against that database.
+concurrency:
+  group: fpl-ingestion-production-database
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.19"
+          enable-cache: false
+
+      - name: Install Python and locked dependencies
+        run: |
+          uv python install 3.14.7
+          uv sync --frozen --no-dev --no-python-downloads
+
+      - name: Write database CA on runner
+        env:
+          DATABASE_SSL_CA_PEM: ${{ secrets.DATABASE_SSL_CA_PEM }}
+          DATABASE_SSL_CA_FILE: ${{ runner.temp }}/fpl-database-ca.pem
+        run: |
+          umask 077
+          printf '%s\n' "$DATABASE_SSL_CA_PEM" > "$DATABASE_SSL_CA_FILE"
+
+      - name: Ingest shared data and resume history
+        env:
+          DATABASE_URL: ${{ secrets.SESSION_DATABASE_URL }}
+          SESSION_DATABASE_URL: ${{ secrets.SESSION_DATABASE_URL }}
+          DATABASE_SSL_CA_FILE: ${{ runner.temp }}/fpl-database-ca.pem
+          FPL_SEASON_ID: ${{ vars.FPL_SEASON_ID }}
+          FPL_RULES_VERSION: ${{ vars.FPL_RULES_VERSION }}
+        run: .venv/bin/python -m fpl_optimizer.ingest
