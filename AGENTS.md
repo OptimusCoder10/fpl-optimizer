@@ -42,5 +42,8 @@ When the private specification is available locally, check `docs/spec/10-roadmap
 ## Working style
 I'm learning as I build this — no prior professional dev background beyond a couple of internship/personal projects. Briefly explain what a tool/library does and why it's used when introducing something new, don't just produce code silently. Keep tasks scoped and focused per session rather than open-ended, to use tokens efficiently on the Pro plan.
 
+## Correctness and pushback
+Before implementing a request, check it against the project specification, HANDOFF.md, existing architecture, and relevant engineering constraints. If my request conflicts with them, would break existing behavior, introduces unnecessary complexity, or appears technically incorrect, pause and explain the concern instead of blindly following it. Recommend a safer or more appropriate approach, explain the trade-off briefly, and ask for confirmation when the choice materially changes the requirements. Don’t push back on harmless preferences; distinguish definite conflicts from judgment calls.
+
 ## Note
 Current tool roles: **Codex is primary** (college-provided access, tried first). **Antigravity** is used specifically for browser-based testing and long-running background tasks (e.g. backtesting scripts, bulk data population) — not general implementation. **Claude Code** is the fallback if Codex doesn't work out. `AGENTS.md` and `CLAUDE.md` intentionally contain the same project instructions and must be updated together.
