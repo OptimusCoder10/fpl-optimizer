@@ -22,6 +22,7 @@ from fpl_optimizer.schemas.element_summary import (
     ElementSummaryEnvelope,
     PlayerHistoryPublication,
 )
+from fpl_optimizer.services.scoring_components import score_fixture
 from fpl_optimizer.services.shared_catalog import SHARED_METADATA_KEY
 
 
@@ -62,41 +63,7 @@ def _reconstruct_fixture_points(
     row: ElementFixtureHistory | PlayerFixtureHistory,
     position: int,
 ) -> int:
-    appearance = 0 if row.minutes == 0 else (1 if row.minutes < 60 else 2)
-    goal_points = {1: 10, 2: 6, 3: 5, 4: 4}[position]
-    clean_sheet_points = {1: 4, 2: 4, 3: 1, 4: 0}[position]
-    defensive_points = 0
-    if position == 2:
-        defensive_points = (
-            2
-            if row.clearances_blocks_interceptions + row.tackles >= 10
-            else 0
-        )
-    elif position in {3, 4}:
-        defensive_points = (
-            2
-            if row.clearances_blocks_interceptions
-            + row.tackles
-            + row.recoveries
-            >= 12
-            else 0
-        )
-
-    return (
-        appearance
-        + row.goals_scored * goal_points
-        + row.assists * 3
-        + (row.clean_sheets * clean_sheet_points if row.minutes >= 60 else 0)
-        + (row.saves // 3 if position == 1 else 0)
-        - (row.goals_conceded // 2 if position in {1, 2} else 0)
-        + defensive_points
-        + row.bonus
-        + row.penalties_saved * 5
-        - row.penalties_missed * 2
-        - row.yellow_cards
-        - row.red_cards * 3
-        - row.own_goals * 2
-    )
+    return score_fixture(row, position).total_points
 
 
 async def publish_player_history(
