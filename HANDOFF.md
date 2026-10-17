@@ -2,7 +2,7 @@
 
 This file tracks live build progress — what's actually done, not just what's planned. Read this before starting any task; update it before finishing one.
 
-## Current State — 2026-10-17
+## Current State — 2026-10-18
 
 Phase 1 data services through the scoped slice 1.6 and Task 4a HTTP/manual ingestion are implemented with synthetic HTTP tests; broader history eligibility, live-FPL probes and real-manager validation remain open. Task 4b's scheduled/manual Actions ingestion has published shared data and resumed history across separate runner executions. Hosted Supabase migrations and rollback-only publication passed. Render's Singapore free instance built on Python 3.14.7, passed the serial CBC proof and returned 200 from both health routes with verified-TLS database readiness. Cold/warm health timings are recorded below. Actual frontend CORS and threaded CBC on Render remain unverified.
 
@@ -34,7 +34,7 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [x] HTTP layer derives manager-response completeness from the fetch result; failed or truncated transfers never become a complete empty history (Task 4a, fake-transport proof).
 - [x] Task 4b: authored scheduled/manual GitHub Actions workflow for the existing ingestion command; local configuration review only.
 - [x] Task 4b: inspect real Actions runs for CA/TLS connection and ingestion/checkpoint behavior across runner executions (owner-supplied logs; details below).
-- [ ] Phase 1B: run the suite on exactly Python 3.14.7.
+- [x] Phase 1B: run the suite on exactly Python 3.14.7 (349 passed, owner-run).
 - [ ] Controlled real-FPL probes validate the same parsing/publication paths after saved-fixture tests pass
 - [x] Phase 1B step 1: verified-TLS Supabase session-pooler connection, hosted migrations/schema check and rollback-only advisory-lock publication proof (2026-10-13; details below)
 - [x] Phase 1B preparation: optional trusted CA-file setting and online Alembic ingestion-lock/same-database integration, verified locally and on Supabase (2026-10-13)
@@ -45,9 +45,9 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [x] Phase 1B step 2: record measured cold and warm health timings on Render (app boot time and separate CBC timing were not captured)
 - [ ] Phase 1B CBC follow-up: re-test the undiagnosed failure with explicit threaded CBC on Render using only the synthetic proof; if it recurs, capture raw CBC stdout/stderr, problem/solution statuses, solver version/options and elapsed time. Keep the default serial mode until the cause is understood.
 - [x] Phase 1B Actions: runner-local CA file supplied; first real run connected and published through the configured certificate- and hostname-verifying connection path (owner-supplied log; no explicit "TLS verified" line).
-- [x] Phase 1B Actions: history ingestion resumes across separate runs; pending fell from 582 to 483 and the run-1 failed player recovered (owner-supplied logs).
-- [ ] Phase 1B Actions: measure aggregate per-player fetch versus commit duration in the count line without player names; compare projected full-sweep time with the §05B two-hour finalized-coverage grace.
-- [ ] Phase 1B Actions: revisit full-sweep duration after per-player timing is measured; at about 95 players per run and sparse scheduled starts, a sweep may take longer than the 24-hour due-again interval. Consider reducing per-player time or using a more reliable trigger.
+- [x] Phase 1B Actions: history ingestion resumes across separate runs; pending fell 582 → 483 → 388 → 301 → 222 → 139 → 52 → 0, and the run-1 failed player recovered (owner-supplied logs). Run #9 reached pending=0 in 6m24s.
+- [ ] Phase 1B Actions: measure aggregate per-player fetch, pacing, commit and other duration in a live count line, then compare with the §05B two-hour finalized-coverage grace. Instrumentation is implemented locally; a live breakdown and comparison remain open.
+- [ ] Phase 1B Actions: revisit full-sweep duration after live per-player timing is measured; observed throughput is about 7 seconds per player, projecting about 28 hours for a first full sweep. At that rate, a daily refresh needs about 78 minutes of runner time versus about seven runs per day observed on Oct 17. Investigate finalization-triggered refresh versus the two-hour grace, and whether to reduce per-player time or use a more reliable trigger.
 - [ ] Phase 1B / §09C: create a least-privilege ingestion database role separate from the runtime role, then use its session URL for Actions.
 - [ ] Phase 1B: remaining role/storage configuration and raw snapshot retention
 - [ ] Phase 2: implement and test the §04D prior-selection order — previous-season same player → earlier current-season other same-position players → previous-season position pool; with no prior, use personal current observations alone without κ, otherwise report prediction unavailable.
@@ -348,3 +348,11 @@ Pinned source: `vaastav/Fantasy-Premier-League`, season `2025-26`, commit `9779c
 - The cron is configured for every 30 minutes, but only one scheduled run fired in about 4.5 hours after the push. GitHub documents that scheduled runs can be delayed or dropped ([GitHub event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)); treat Actions scheduling as best-effort.
 - At roughly 95 players per run and these sparse starts, a full sweep may exceed the 24-hour due-again interval. Measure per-player fetch and commit time before choosing between lowering per-player time and a more reliable trigger.
 - HANDOFF documentation only; no application code, workflow or tests changed. Commit requested by owner: `docs: record second Actions ingestion run (phase 1B)`.
+
+### Subsequent Actions Runs and History Timing — 2026-10-18
+
+- **Tool: Codex (documentation of owner-supplied results).** The exact Python 3.14.7 suite passed with **349 tests**. Across scheduled runs, history `pending` fell **582 → 483 → 388 → 301 → 222 → 139 → 52 → 0**, proving resume across separate runner executions; the single failed player recovered. Run #9 reached pending=0 in **6m24s**.
+- The 24-hour due-again cycle is working: run #8 changed pending from 52 to 56 despite 81 successes, and run #10 left pending=10. That **85 and 99 players became due** is inferred from the arithmetic, not directly logged as a due count.
+- Observed throughput is about **7 seconds per player**, much longer than the 200ms courtesy pacing. A first 667-player sweep projects to about **28 hours** at that rate; daily refresh needs about **78 minutes of runner time**. About **seven runs occurred on Oct 17**. Scheduling was sparse early after the push: only one scheduled run occurred in about **4.5 hours**. These are operational observations and estimates, not an identified cause of the per-player delay.
+- **Tool: Codex.** Added aggregate fetch, pacing, commit and other durations plus per-attempt fetch/commit averages and maxima to the existing history count line, using the injected elapsed clock. Fetch includes HTTP retries and waits, while the client's 200ms pauses are separated into pacing. Three new fake-clock tests cover exact line values, failed-player time and separation of pacing from retry waits; the complete local Python 3.14.7 suite passed **352 tests** against disposable PostgreSQL. The live breakdown, finalization-triggered refresh versus the two-hour coverage grace, and a least-privilege ingestion role remain open. No retry, backoff, checkpoint, budget or success-time policy was changed. No commit.
+- **Tool: Codex follow-up.** Added `test_history_log_contains_no_player_ids_names_urls_or_credentials` with distinct synthetic player IDs, names, and a failed fetch carrying URL and credential markers. The captured history count line contains none of them. Full local Python 3.14.7 suite: **353 passed** against disposable PostgreSQL. The live timing-breakdown checklist item remains open. No runtime behavior change or commit.

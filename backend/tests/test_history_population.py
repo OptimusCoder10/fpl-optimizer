@@ -1,6 +1,7 @@
 """Resumption and failure isolation against disposable PostgreSQL, without HTTP."""
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from itertools import count
 
@@ -11,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from fpl_optimizer.db.advisory_lock import ingestion_lock
 from fpl_optimizer.db.models import CacheMetadata, Player
-from fpl_optimizer.services import player_history
+from fpl_optimizer.db.session import create_session_factory
+from fpl_optimizer.schemas.fixtures import SharedCatalogEnvelope
+from fpl_optimizer.services import history_population, player_history
 from fpl_optimizer.services.history_population import populate_history, read_population_status
 from fpl_optimizer.services.shared_catalog import publish_shared_catalog
 from test_player_history import load_json_fixture, publish_catalog, shared_envelope, shared_publication
@@ -81,6 +84,123 @@ async def checkpoints(factory, season):
                 CacheMetadata.key.startswith("history/player/"),
             ))
         ).all()}
+
+
+async def test_history_log_reports_exact_aggregate_durations(
+    population, publication_settings, monkeypatch, caplog,
+):
+    factory, season, clock, _, _ = population
+    pacing = 0.0
+    original_write = player_history._write_player_history
+    original_discover = history_population._discover_required_players
+
+    async def timed_discover(*args, **kwargs):
+        clock.advance(timedelta(seconds=5))
+        return await original_discover(*args, **kwargs)
+
+    async def timed_write(*args, **kwargs):
+        clock.advance(timedelta(seconds=3))
+        return await original_write(*args, **kwargs)
+
+    async def fetch(player_id):
+        nonlocal pacing
+        if player_id == 5:
+            clock.advance(timedelta(milliseconds=200))
+            pacing += 0.2
+        clock.advance(timedelta(seconds=2 if player_id == 1 else 4))
+        payload = load_json_fixture("element_summary_5.json")
+        for row in payload["history"]:
+            row["element"] = player_id
+        return payload
+
+    monkeypatch.setattr(player_history, "_write_player_history", timed_write)
+    monkeypatch.setattr(history_population, "_discover_required_players", timed_discover)
+    with caplog.at_level(logging.INFO, logger="fpl_optimizer"):
+        await populate_history(
+            factory, season, fetch, clock=clock.now, budget=timedelta(minutes=10),
+            elapsed_clock=clock.monotonic, pacing_elapsed=lambda: pacing,
+            settings=publication_settings,
+        )
+    line = next(record.message for record in caplog.records
+                if record.message.startswith("History population:"))
+    assert line == (
+        "History population: success=2 failed=0 pending=0 required=2 "
+        "fetch_s=6.000 pacing_s=0.200 commit_s=6.000 other_s=5.000 "
+        "fetch_avg_s=3.000 fetch_max_s=4.000 commit_avg_s=3.000 commit_max_s=3.000"
+    )
+    assert "player/1" not in line and "player/5" not in line
+    assert "element-summary" not in line
+
+
+async def test_history_log_counts_failed_player_fetch_time(
+    population, publication_settings, caplog,
+):
+    factory, season, clock, _, _ = population
+
+    async def fetch(player_id):
+        clock.advance(timedelta(seconds=7 if player_id == 1 else 2))
+        if player_id == 1:
+            raise RuntimeError("secret URL for player 1")
+        payload = load_json_fixture("element_summary_5.json")
+        return payload
+
+    with caplog.at_level(logging.INFO, logger="fpl_optimizer"):
+        await populate_history(
+            factory, season, fetch, clock=clock.now, budget=timedelta(minutes=10),
+            elapsed_clock=clock.monotonic, settings=publication_settings,
+        )
+    line = next(record.message for record in caplog.records
+                if record.message.startswith("History population:"))
+    assert "success=1 failed=1 pending=1 required=2" in line
+    assert "fetch_s=9.000" in line
+    assert "fetch_avg_s=4.500 fetch_max_s=7.000" in line
+    assert "player 1" not in line and "secret" not in line
+
+
+async def test_history_log_contains_no_player_ids_names_urls_or_credentials(
+    migrated_test_engine, publication_settings, caplog,
+):
+    year = next(SEASONS)
+    season = f"{year}-{str(year + 1)[-2:]}"
+    factory = create_session_factory(migrated_test_engine)
+    catalog = {
+        "bootstrap": load_json_fixture("bootstrap_static.json"),
+        "fixtures": load_json_fixture("fixtures.json"),
+    }
+    player_ids = (910001, 920002)
+    player_names = ("Private Alpha", "Private Beta")
+    for player, player_id, name in zip(
+        catalog["bootstrap"]["elements"], player_ids, player_names, strict=True,
+    ):
+        player["id"] = player_id
+        player["web_name"] = name
+    await publish_shared_catalog(
+        factory, SharedCatalogEnvelope.model_validate(catalog),
+        shared_publication(season), settings=publication_settings,
+    )
+    clock = FakeClock()
+    url = "https://private.example.test/history/"
+    credential = "credential-private-marker"
+
+    async def fetch(player_id):
+        if player_id == player_ids[1]:
+            raise RuntimeError(f"{url}{player_id}?token={credential}")
+        payload = load_json_fixture("element_summary_5.json")
+        for row in payload["history"]:
+            row["element"] = player_id
+        return payload
+
+    with caplog.at_level(logging.INFO, logger="fpl_optimizer"):
+        await populate_history(
+            factory, season, fetch, clock=clock.now, budget=timedelta(minutes=10),
+            elapsed_clock=clock.monotonic, settings=publication_settings,
+        )
+    history_lines = [record.message for record in caplog.records
+                     if record.message.startswith("History population:")]
+    assert len(history_lines) == 1
+    log_text = history_lines[0]
+    for private_value in (*map(str, player_ids), *player_names, url, credential):
+        assert private_value not in log_text
 
 
 async def test_a_fails_b_commits_and_restart_honours_backoff(population):

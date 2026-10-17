@@ -51,6 +51,7 @@ class FPLClient:
         self.exhausted = False
         self._retry_not_before = 0.0
         self._last_player_end: float | None = None
+        self.player_pacing_seconds = 0.0
         self._player_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(
             base_url=BASE_URL, transport=transport, trust_env=False,
@@ -103,7 +104,13 @@ class FPLClient:
                 return self._budget_failure()
             if player and self._last_player_end is not None:
                 pause = max(0.0, PLAYER_CALL_INTERVAL - (self.elapsed_clock() - self._last_player_end))
-                if not await self._delay(pause):
+                pacing_started = self.elapsed_clock()
+                try:
+                    pacing_ok = await self._delay(pause)
+                finally:
+                    if pause > 0:
+                        self.player_pacing_seconds += self.elapsed_clock() - pacing_started
+                if not pacing_ok:
                     return self._budget_failure()
             retry_after = 0.0
             try:

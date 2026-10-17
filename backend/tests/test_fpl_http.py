@@ -113,6 +113,25 @@ async def test_player_pacing_is_sequential_including_concurrent_callers_and_retr
     assert all(start - end >= 0.2 - 1e-9 for start, end in zip(starts[1:], ends))
 
 
+async def test_player_pacing_counter_excludes_retry_waits():
+    clock = Clock()
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json=history(int(request.url.path.split("/")[-2])))
+
+    async with client_for(handler, clock) as client:
+        assert (await client.element_summary(1)).status == "success"
+        assert (await client.element_summary(2)).status == "success"
+        assert calls == 3
+        assert abs(client.player_pacing_seconds - 0.2) < 1e-9
+        assert clock.elapsed > client.player_pacing_seconds
+
+
 async def test_all_shared_endpoint_boundaries_and_paths():
     bootstrap, fixtures = full_season()
     paths = []

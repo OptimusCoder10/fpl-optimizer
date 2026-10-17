@@ -119,6 +119,7 @@ async def run_ingestion(
             session_factory, season_id, fetch_history, lock_connection=connection,
             clock=client.clock, budget=timedelta(seconds=client.remaining()),
             elapsed_clock=client.elapsed_clock,
+            pacing_elapsed=lambda: client.player_pacing_seconds,
         )
         status = ("budget_exhausted" if history.budget_exhausted
                   else "partial" if history.failed else "success")

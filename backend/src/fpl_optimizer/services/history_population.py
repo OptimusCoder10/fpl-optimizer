@@ -103,6 +103,7 @@ async def populate_history(
     clock: Callable[[], datetime],
     budget: timedelta,
     elapsed_clock: Callable[[], float] = monotonic,
+    pacing_elapsed: Callable[[], float] = lambda: 0.0,
     settings: Settings | None = None,
 ) -> PopulationResult | None:
     """Hold the ingestion lock for the run, with one atomic publish per player.
@@ -123,18 +124,24 @@ async def populate_history(
         return await _populate_history_locked(
             session_factory, season_id, fetcher, lock_connection=lock_connection,
             clock=clock, budget=budget, elapsed_clock=elapsed_clock, started=started,
+            pacing_elapsed=pacing_elapsed,
         )
 
 
 async def _populate_history_locked(
     session_factory, season_id, fetcher, *, lock_connection,
     clock, budget, elapsed_clock=monotonic, started=None,
+    pacing_elapsed=lambda: 0.0,
 ) -> PopulationResult:
     """Existing runner under a caller-held ingestion lock (no nested acquisition)."""
     if budget < timedelta(0):
         raise ValueError("history budget must be nonnegative")
     if started is None:
         started = elapsed_clock()
+    run_started = elapsed_clock()
+    fetch_seconds = pacing_seconds = commit_seconds = 0.0
+    max_fetch = max_commit = 0.0
+    attempted = 0
     now = _utc(clock())
     async with session_factory.begin() as session:
         await require_same_database(lock_connection, await session.connection())
@@ -160,6 +167,7 @@ async def _populate_history_locked(
             budget_exhausted = True
             break
         player_id = _player_id(checkpoint)
+        attempted += 1
         attempted_at = _utc(clock())
         async with session_factory.begin() as session:
             await require_same_database(lock_connection, await session.connection())
@@ -174,8 +182,21 @@ async def _populate_history_locked(
 
         category = "fetch"
         stop_run = False
+        commit_started = None
         try:
-            raw = await fetcher(player_id)
+            fetch_started = elapsed_clock()
+            pacing_started = pacing_elapsed()
+            try:
+                raw = await fetcher(player_id)
+            finally:
+                elapsed = max(0.0, elapsed_clock() - fetch_started)
+                pacing = max(0.0, pacing_elapsed() - pacing_started)
+                pacing = min(pacing, elapsed)
+                pacing_seconds += pacing
+                fetch = elapsed - pacing
+                fetch_seconds += fetch
+                max_fetch = max(max_fetch, fetch)
+            commit_started = elapsed_clock()
             category = "validation"
             envelope = ElementSummaryEnvelope.model_validate(raw)
             publication = PlayerHistoryPublication(
@@ -225,6 +246,11 @@ async def _populate_history_locked(
                 else:
                     succeeded += 1
                     continue
+        finally:
+            if commit_started is not None:
+                commit = max(0.0, elapsed_clock() - commit_started)
+                commit_seconds += commit
+                max_commit = max(max_commit, commit)
 
         # Separate short transaction after rollback; never overwrite success,
         # source time, coverage, rows, or publication versions on failure.
@@ -260,9 +286,16 @@ async def _populate_history_locked(
         required=len(states),
         budget_exhausted=budget_exhausted,
     )
+    other_seconds = max(0.0, elapsed_clock() - run_started - fetch_seconds
+                        - pacing_seconds - commit_seconds)
     logger.info(
-        "History population: success=%d failed=%d pending=%d required=%d",
+        "History population: success=%d failed=%d pending=%d required=%d "
+        "fetch_s=%.3f pacing_s=%.3f commit_s=%.3f other_s=%.3f "
+        "fetch_avg_s=%.3f fetch_max_s=%.3f commit_avg_s=%.3f commit_max_s=%.3f",
         result.succeeded, result.failed, result.pending, result.required,
+        fetch_seconds, pacing_seconds, commit_seconds, other_seconds,
+        fetch_seconds / attempted if attempted else 0.0, max_fetch,
+        commit_seconds / attempted if attempted else 0.0, max_commit,
     )
     return result
 
