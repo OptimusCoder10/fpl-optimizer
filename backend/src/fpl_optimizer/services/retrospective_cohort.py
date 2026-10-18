@@ -11,6 +11,11 @@ from typing import Iterable
 from fpl_optimizer.services.scoring_components import score_fixture
 
 
+def _require_aware_kickoff(kickoff_time: datetime | None) -> None:
+    if kickoff_time is not None and kickoff_time.utcoffset() is None:
+        raise ValueError("kickoff_time must be timezone-aware")
+
+
 @dataclass(frozen=True)
 class BenchmarkFixture:
     fixture_id: int
@@ -18,6 +23,9 @@ class BenchmarkFixture:
     kickoff_time: datetime | None
     home_team_id: int
     away_team_id: int
+
+    def __post_init__(self) -> None:
+        _require_aware_kickoff(self.kickoff_time)
 
 
 @dataclass(frozen=True)
@@ -46,6 +54,9 @@ class BenchmarkRow:
     red_cards: int = 0
     own_goals: int = 0
 
+    def __post_init__(self) -> None:
+        _require_aware_kickoff(self.kickoff_time)
+
 
 @dataclass(frozen=True)
 class EventCutoff:
@@ -70,6 +81,7 @@ class PlayerEvent:
     result_fixture_ids: tuple[int, ...]
     outcome_points: int | None
     outcome_exclusion_reason: str | None
+    target_position_differs: bool
 
 
 @dataclass(frozen=True)
@@ -127,15 +139,20 @@ def select_cohort(
     ``player_ids`` is an explicit universe independent of history rows. A
     target result row can affect outcome quality, but never input eligibility.
     """
+    rows_by_player: dict[int, list[BenchmarkRow]] = {}
+    seen_keys: set[tuple[int, int]] = set()
+    for row in rows:
+        key = (row.player_id, row.fixture_id)
+        if key in seen_keys:
+            raise ValueError("duplicate player-fixture row")
+        seen_keys.add(key)
+        rows_by_player.setdefault(row.player_id, []).append(row)
     fixture_list = tuple(fixtures)
     cutoff = cutoff_for_event(event, fixture_list)
     if cutoff.skipped:
         return CohortSelection(cutoff, (), ())
     assert cutoff.cutoff_time is not None
     fixture_by_id = {fixture.fixture_id: fixture for fixture in fixture_list}
-    rows_by_player: dict[int, list[BenchmarkRow]] = {}
-    for row in rows:
-        rows_by_player.setdefault(row.player_id, []).append(row)
     selected: list[PlayerEvent] = []
     first_time: list[int] = []
     for player_id in sorted(set(player_ids)):
@@ -178,5 +195,6 @@ def select_cohort(
             result_fixture_ids=result_ids,
             outcome_points=points,
             outcome_exclusion_reason=exclusion,
+            target_position_differs=any(row.position != latest.position for row in results),
         ))
     return CohortSelection(cutoff, tuple(selected), tuple(first_time))

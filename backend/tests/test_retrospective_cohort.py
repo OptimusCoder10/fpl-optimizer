@@ -3,6 +3,8 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from fpl_optimizer.services.retrospective_cohort import (
     BenchmarkFixture, BenchmarkRow, cutoff_for_event, select_cohort,
 )
@@ -224,3 +226,40 @@ def test_adding_or_removing_invisible_rows_changes_nothing():
     invisible = [row(102, 1, late), row(103, 1, None),
                  row(102, 1, late, player=2)]
     assert chosen(fixtures, rows, (1, 2)) == chosen(fixtures, rows + invisible, (1, 2))
+
+
+def test_naive_fixture_kickoff_is_rejected():
+    with pytest.raises(ValueError, match="kickoff_time must be timezone-aware"):
+        fixture(201, 2, datetime(2026, 9, 12, 12, 0))
+
+
+def test_naive_row_kickoff_is_rejected():
+    with pytest.raises(ValueError, match="kickoff_time must be timezone-aware"):
+        row(101, 1, datetime(2026, 9, 5, 12, 0))
+
+
+def test_duplicate_player_fixture_rows_are_rejected():
+    fixtures, rows = standard()
+    with pytest.raises(ValueError) as error:
+        chosen(fixtures, rows + [rows[0]])
+    assert str(error.value) == "duplicate player-fixture row"
+
+
+def test_player_whose_only_row_lacks_kickoff_is_first_time():
+    fixtures, rows = standard()
+    rows.append(row(101, 1, None, player=2))
+    result = chosen(fixtures, rows, (1, 2))
+    assert tuple(player.player_id for player in result.players) == (1,)
+    assert result.first_time_player_ids == (2,)
+    assert result.first_time_count == 1
+
+
+def test_outcome_uses_target_row_position_and_flags_difference():
+    fixtures, rows = standard()
+    rows[0] = replace(rows[0], position=4)
+    rows[1] = replace(rows[1], position=2, minutes=90, clean_sheets=1)
+    player = chosen(fixtures, rows).players[0]
+    assert player.position == 4
+    assert player.outcome_points == 6  # Defender: two appearance + four clean-sheet points.
+    assert player.target_position_differs
+    assert player.outcome_exclusion_reason is None
