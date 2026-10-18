@@ -52,12 +52,16 @@ class PriorSelection:
     component_means: dict[str, float] | None
     exclusions: tuple[PriorExclusion, ...]
     personal_current_count: int
+    p_zero_minutes: float | None = None
+    p_under_60: float | None = None
+    p_60_plus: float | None = None
+    expected_minutes: float | None = None
 
 
 def _score_rows(
     rows: Iterable[ScoringRow], position: int, source: str,
     excluded: Counter[tuple[str, str]],
-) -> list[ScoringComponents]:
+) -> list[tuple[ScoringComponents, int]]:
     scored = []
     for row in rows:
         if row.position != position:
@@ -72,13 +76,13 @@ def _score_rows(
             excluded[source, f"missing_required_scoring_count:{missing}"] += 1
             continue
         counts = {name: row.scoring_counts[name] for name in REQUIRED_COUNTS}
-        scored.append(score_fixture(SimpleNamespace(**counts), position))
+        scored.append((score_fixture(SimpleNamespace(**counts), position), counts["minutes"]))
     return scored
 
 
-def _means(scored: list[ScoringComponents]) -> dict[str, float]:
+def _means(scored: list[tuple[ScoringComponents, int]]) -> dict[str, float]:
     return {
-        field.name: math.fsum(sorted(getattr(row, field.name) for row in scored)) / len(scored)
+        field.name: math.fsum(sorted(getattr(points, field.name) for points, _ in scored)) / len(scored)
         for field in fields(ScoringComponents)
     }
 
@@ -110,12 +114,18 @@ def select_prior(
         position, "personal_current", excluded,
     )
 
-    def result(source: PriorSource, scored: list[ScoringComponents]) -> PriorSelection:
+    def result(source: PriorSource, scored: list[tuple[ScoringComponents, int]]) -> PriorSelection:
+        minutes = [value for _, value in scored]
+        count = len(minutes)
         return PriorSelection(
-            source, len(scored), _means(scored) if scored else None,
+            source, count, _means(scored) if scored else None,
             tuple(PriorExclusion(src, reason, count)
                   for (src, reason), count in sorted(excluded.items())),
             len(personal_current),
+            p_zero_minutes=sum(value == 0 for value in minutes) / count if count else None,
+            p_under_60=sum(0 < value < 60 for value in minutes) / count if count else None,
+            p_60_plus=sum(value >= 60 for value in minutes) / count if count else None,
+            expected_minutes=math.fsum(sorted(minutes)) / count if count else None,
         )
 
     if previous.personal_player_id is not None and previous.personal_reason is None:
