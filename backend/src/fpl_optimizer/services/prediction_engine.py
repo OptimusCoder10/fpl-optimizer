@@ -38,7 +38,11 @@ class SeriesEstimate:
         return self.mean is not None
 
 
-def _recent_window(rows: Iterable[FixtureObservation[T]]) -> tuple[FixtureObservation[T], ...]:
+def _recent_window(
+    rows: Iterable[FixtureObservation[T]], window_size: int,
+) -> tuple[FixtureObservation[T], ...]:
+    if isinstance(window_size, bool) or not isinstance(window_size, int) or window_size <= 0:
+        raise ValueError("window_size must be a positive integer")
     observations = tuple(rows)
     if any(row.kickoff_time is None for row in observations):
         raise ValueError("every fixture observation requires a kickoff_time")
@@ -46,7 +50,7 @@ def _recent_window(rows: Iterable[FixtureObservation[T]]) -> tuple[FixtureObserv
         observations,
         key=lambda row: (row.kickoff_time, row.fixture_id),
         reverse=True,
-    )[:WINDOW_SIZE])
+    )[:window_size])
 
 
 def estimate_series(
@@ -55,8 +59,9 @@ def estimate_series(
     prior_mean: int | float | None = None,
     half_life: float = 6,
     prior_strength: float = 3,
+    window_size: int = WINDOW_SIZE,
 ) -> SeriesEstimate:
-    """Weight the newest 12 outcomes and optionally shrink toward an input prior.
+    """Weight the newest ``window_size`` outcomes and optionally shrink toward a prior.
 
     Eligibility, observed threshold scoring and prior selection belong to callers.
     The numeric values can also be 0/1 indicators or observed minutes.
@@ -68,7 +73,7 @@ def estimate_series(
     if prior_mean is not None and not math.isfinite(prior_mean):
         raise ValueError("prior_mean must be finite")
 
-    recent = _recent_window(rows)
+    recent = _recent_window(rows, window_size)
     if any(not math.isfinite(row.value) for row in recent):
         raise ValueError("observation values must be finite")
 
@@ -99,6 +104,7 @@ def estimate_components(
     prior_means: Mapping[str, int | float] | None = None,
     half_life: float = 6,
     prior_strength: float = 3,
+    window_size: int = WINDOW_SIZE,
 ) -> dict[str, SeriesEstimate]:
     """Apply the same window and mixture to each already scored point component."""
     observations = tuple(rows)
@@ -112,6 +118,7 @@ def estimate_components(
             prior_mean=None if prior_means is None else prior_means[name],
             half_life=half_life,
             prior_strength=prior_strength,
+            window_size=window_size,
         )
         for name in component_names
     }
@@ -198,7 +205,7 @@ def predict(
     catalog_trusted: bool, chance: int | float | None, status: str | None,
     owned: bool, rules_version: str, input_version: str,
     assumed_factor: float | None = None, half_life: float = 6,
-    prior_strength: float = 3,
+    prior_strength: float = 3, window_size: int = WINDOW_SIZE,
 ) -> Prediction:
     """Predict one player's target event from already eligible fixture outcomes.
 
@@ -221,9 +228,9 @@ def predict(
     rows = tuple(personal_rows)
     minutes_rows = tuple(FixtureObservation(row.fixture_id, row.kickoff_time, row.value.minutes)
                          for row in rows)
-    # Use the same 12-row window to report evidence even on unavailable results.
+    # Use the selected window to report evidence even on unavailable results.
     evidence = estimate_series(minutes_rows, half_life=half_life,
-                               prior_strength=prior_strength)
+                               prior_strength=prior_strength, window_size=window_size)
     warning_list = []
     if prior.exclusions:
         warning_list.append("prior_rows_excluded")
@@ -260,7 +267,8 @@ def predict(
     scored_rows = tuple(FixtureObservation(row.fixture_id, row.kickoff_time,
                                            score_fixture(row.value, position)) for row in rows)
     components = estimate_components(scored_rows, prior_means=prior.component_means,
-                                     half_life=half_life, prior_strength=prior_strength)
+                                     half_life=half_life, prior_strength=prior_strength,
+                                     window_size=window_size)
     if not all(estimate.available for estimate in components.values()):
         return result("unavailable", "no_prior_or_personal_observations")
 
@@ -281,6 +289,7 @@ def predict(
             (FixtureObservation(row.fixture_id, row.kickoff_time, value)
              for row, value in zip(rows, values, strict=True)),
             prior_mean=prior_mean, half_life=half_life, prior_strength=prior_strength,
+            window_size=window_size,
         )
         for values, prior_mean in zip(series, minute_priors, strict=True)
     )
