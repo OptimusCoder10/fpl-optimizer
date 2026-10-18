@@ -155,5 +155,10 @@ def test_pinned_archive_adapter_counts_if_files_available():
     complete = service.adapt_validated_archive(load_pinned_archive(directory))
     assert complete.counts.rows == 29_747
     development = service.load_development_view(directory)
+    assert development.counts.rows == 14_175
+    assert development.counts.fixtures == 190
+    assert development.counts.events == 19
+    assert development.counts.dropped_rows == 15_572
+    assert development.counts.dropped_fixtures == 190
     assert all(row.event <= 19 for row in development.rows)
     assert all(fixture.event <= 19 for fixture in development.fixtures)
