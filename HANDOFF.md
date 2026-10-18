@@ -2,11 +2,11 @@
 
 This file tracks live build progress — what's actually done, not just what's planned. Read this before starting any task; update it before finishing one.
 
-## Current State — 2026-10-18
+## Current State — 2026-10-19
 
 Phase 1 data services through the scoped slice 1.6 and Task 4a HTTP/manual ingestion are implemented with synthetic HTTP tests; broader history eligibility, live-FPL probes and real-manager validation remain open. Task 4b's scheduled/manual Actions ingestion has published shared data and resumed history across separate runner executions. Hosted Supabase migrations and rollback-only publication passed. Render's Singapore free instance built on Python 3.14.7, passed the serial CBC proof and returned 200 from both health routes with verified-TLS database readiness. Cold/warm health timings are recorded below. Actual frontend CORS and threaded CBC on Render remain unverified.
 
-Phase 2 Tasks 2.1–2.4 now have pure per-fixture scoring components, a 12-fixture recency/shrinkage mixture, explicit prior selection with minute-distribution means, and availability-adjusted fixture/event prediction. Task 2.5a selects retrospective cohorts and outcomes; 2.5b supplies pure baselines and metric arithmetic; 2.5c-1 adds a pinned-archive adapter and a GW1–19 development view. Task 2.5c-2 now has a development-only runner, 18-candidate grid entry point, aggregate JSON report writer and pure selection arithmetic. The real pinned-archive fold timing and full grid remain open; no parameters have been frozen. Live input assembly/coverage eligibility remain open.
+Phase 2 Tasks 2.1–2.4 now have pure per-fixture scoring components, a 12-fixture recency/shrinkage mixture, explicit prior selection with minute-distribution means, and availability-adjusted fixture/event prediction. Task 2.5a selects retrospective cohorts and outcomes; 2.5b supplies pure baselines and metric arithmetic; 2.5c-1 adds a pinned-archive adapter and a GW1–19 development view. Task 2.5c-2 now has a development-only runner, 18-candidate grid entry point, aggregate JSON report writer and pure selection arithmetic. The owner ran the full pinned-archive development grid; the report's pure selector kept 12/6/3 because no challenger passed both gates. The report remains local and no parameters have been frozen. Live input assembly/coverage eligibility remain open.
 
 ## Current Phase
 Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record is `docs/spec/AMENDMENTS.md`; §§01–12 define the contract. Slices 1.1–1.3, the owner-scoped portion of 1.4, 1.5 and the synthetic-only 1.6 service are implemented. The hosted database, migration and rollback-only publication proof passed, as did Render's Python/serial-CBC/TLS-health proof. Task 4a now wires HTTP/manual ingestion to those existing services. The checklist distinguishes remaining live-FPL/real-manager validation, history eligibility, CORS, Actions and threaded-CBC work.
@@ -66,7 +66,9 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [x] Phase 2 Task 2.5c-2 implementation: development-only runner, 18-candidate grid, three-fold/pooled aggregation, paired one-SE selection and aggregate JSON report writer; eleven requested named acceptance tests plus one single-fold command test. No full grid executed or parameters frozen.
 - [x] Phase 2 Task 2.5c-2b: development-grid command runs the declared 18 candidates and three folds, applies the existing pure selector, writes the aggregate report to `/tmp` by default, and prints count-only progress plus aggregate candidate and selection metrics; one synthetic entry-point test added.
 - [x] Phase 2 Task 2.5c-2 evidence preparation: downloaded the four full pinned archive files to `/tmp/fpl-pinned-2025-26` and matched each SHA-256 against the pinned checksums. This `/tmp` copy is temporary.
-- [ ] Phase 2 Task 2.5c-2 evidence: measure one candidate on one fold on the pinned development view, obtain owner confirmation, then run the full grid and publish the report.
+- [x] Phase 2 Task 2.5c-2 evidence: owner ran the full pinned-archive 18-candidate grid over GW6–19; Codex read and checked the local aggregate report, with all three declared folds, 17 comparisons, zero qualifiers and a keep-default selection.
+- [x] Phase 2 Task 2.5c-2 report preservation: copied the owner-run JSON outside temporary storage before further work; the preserved private copy now explains the selection without a rerun.
+- [ ] Phase 2 Task 2.5c-2 follow-up: review/publish the development-fold report and explicitly freeze baseline parameters before any final-period comparison.
 - [ ] Phase 2 live pipeline: apply the open slice 1.4 per-player age/coverage eligibility gate before assembling personal/current-position inputs; adapt current rows and integrate prior selection with the predictor.
 - [ ] Phase 2: capture pre-deadline forecast bundles once the predictor exists
 - [ ] Phase 4 / §07A: implement the one-solve admission slot; on timeout/cancellation stop the CBC child and release capacity in finally, with tests proving a subsequent request can acquire the slot
@@ -118,6 +120,20 @@ Things the next session should know before touching this code.
 
 ## Tool Log
 Which tool did which piece of work — useful for knowing where to look first if something breaks.
+
+- Codex — 2026-10-19 (report preservation): copied the owner-run report outside temporary storage before any other action and verified the original copy's SHA-256 `2b853f6883321f1d7086ec3739a9d003e60fb770d4f6d071b259a71f4ee016bf`. Moved the preserved copy to private ignored documentation, then added failed-condition labels from its existing aggregate comparisons, confirming all labels against the saved qualification booleans. The original temporary report remains unchanged. No grid rerun or parameter freeze.
+
+- Codex — 2026-10-19 (owner-run development grid review, extended by Codex): read the owner's full-grid console output and aggregate report; did not rerun the grid. Verified 18 candidates, each with folds GW6–10, 11–15 and 16–19, 14,175 development rows, 190 fixtures and 19 development events. The 17 paired comparisons have zero qualifiers; selection reason is `keep_default`. Best overall challenger 12/12/1 improves pooled overall MAE from **1.176671** to **1.105527**, with paired mean candidate-minus-default weekly difference **−0.071209** and SE **0.002461** across 14 weeks. Its pooled active-cohort MAE rises from **2.063062** to **2.162020**, so **active-cohort MAE alone blocks it** under J34. Owner-reported wall time was **4,951.75 seconds** (about 82.5 minutes). Pooled point metrics for the default model and four baselines are:
+
+  | Comparator | Overall MAE | Active MAE | Bias | RMSE |
+  |---|---:|---:|---:|---:|
+  | Default model 12/6/3 | 1.176671 | 2.063062 | 0.017112 | 2.085450 |
+  | Zero | 1.218335 | 2.666667 | −1.210372 | 2.716210 |
+  | Position mean | 1.582280 | 2.120929 | 0.031403 | 2.431404 |
+  | Personal mean | 1.078773 | 2.230027 | 0.015390 | 2.111114 |
+  | Latest six | 1.074477 | 2.286932 | 0.000008 | 2.147158 |
+
+  The two personal baselines have lower pooled overall MAE than the model but worse active-cohort MAE. The report contains no player-ID/name keys. New reporting test: `test_selection_reports_which_condition_blocked_the_challenger`; full Python 3.14.7 backend suite **514 passed, 1 optional skipped, in 19.92 s**. No held-out scoring, parameter freeze, report publication or decision-log change.
 
 - Codex — 2026-10-18 (archive path follow-up): confirmed `backend/tests/fixtures/prior_archive` is the reduced sample and cannot pass `load_pinned_archive`. Downloaded the four full files from the predeclared `vaastav/Fantasy-Premier-League` commit into `/tmp/fpl-pinned-2025-26` and verified all four SHA-256 values against `PINNED_SHA256`. No real fold or grid execution, parameter freeze, decision-log change, commit or push.
 

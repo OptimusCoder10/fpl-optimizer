@@ -6,7 +6,7 @@ from pathlib import Path
 from time import perf_counter
 
 from fpl_optimizer.services.retrospective_runner import (
-    DEFAULT_CANDIDATE, GRID, DevelopmentView, run_development_candidate,
+    BASELINE_NAMES, DEFAULT_CANDIDATE, GRID, DevelopmentView, run_development_candidate,
     select_development_candidate, write_development_report,
 )
 
@@ -38,25 +38,39 @@ def main(argv: list[str] | None = None) -> int:
               f"pooled active-cohort MAE={active.mae}, bias={overall.bias}, "
               f"RMSE={overall.rmse}")
 
-    # The default is its own reference. If it stays selected, show the best
-    # challenger's paired comparison so the decision remains inspectable.
+    default_result = next(result for result in completed
+                          if result.candidate == DEFAULT_CANDIDATE)
+    for label, points in (
+        ("pooled", default_result.pooled_points),
+        *((f"GW{fold.first_event}-{fold.last_event}", fold.points)
+          for fold in default_result.folds),
+    ):
+        for name in ("model", *BASELINE_NAMES):
+            overall = points[name].overall
+            active = points[name].active_overall
+            print(f"default comparison {label} {name}: overall MAE={overall.mae}, "
+                  f"active-cohort MAE={active.mae}, bias={overall.bias}, "
+                  f"RMSE={overall.rmse}")
+
     comparisons = decision.comparisons
     if decision.selected == DEFAULT_CANDIDATE:
-        comparison = min(comparisons, key=lambda item: (
-            float("inf") if item["pooled_overall_mae"] is None
-            else item["pooled_overall_mae"], item["candidate"]["lookback"],
-            item["candidate"]["half_life"], item["candidate"]["prior_strength"],
-        ))
+        comparison = next(item for item in comparisons
+                          if item["candidate"] == asdict(decision.best_challenger))
+        blocked = ", ".join({
+            "se_bar": "SE bar", "active_cohort_mae": "active-cohort MAE",
+        }[reason] for reason in decision.best_challenger_blocked_by)
         print(f"selection: kept defaults {asdict(DEFAULT_CANDIDATE)}; "
               f"best challenger {comparison['candidate']}, "
               f"paired mean difference={comparison['paired_mean_difference']}, "
-              f"standard error={comparison['paired_standard_error']}")
+              f"standard error={comparison['paired_standard_error']}; "
+              f"blocked by {blocked}")
     else:
         comparison = next(item for item in comparisons
                           if item["candidate"] == asdict(decision.selected))
         print(f"selection: chosen candidate {asdict(decision.selected)}, "
               f"paired mean difference={comparison['paired_mean_difference']}, "
-              f"standard error={comparison['paired_standard_error']}")
+              f"standard error={comparison['paired_standard_error']}; "
+              "passed SE bar and active-cohort MAE")
     print(f"aggregate report: {report}")
     return 0
 

@@ -106,6 +106,8 @@ class SelectionDecision:
     default: Candidate
     comparisons: tuple[dict[str, object], ...]
     reason: str
+    best_challenger: Candidate | None
+    best_challenger_blocked_by: tuple[str, ...]
 
 
 def _prior_row(row: BenchmarkRow) -> SimpleNamespace:
@@ -254,11 +256,13 @@ def select_development_candidate(results: tuple[CandidateResult, ...]) -> Select
         active = result.pooled_points["model"].active_overall.mae
         paired = paired_gameweek_mae_difference(result.model_records, default.model_records)
         improvement = None if overall is None else default_mae - overall
-        qualifies = (
-            improvement is not None and paired.standard_error is not None
-            and improvement > paired.standard_error
-            and active is not None and active <= default_active
-        )
+        clears_se_bar = (improvement is not None and paired.standard_error is not None
+                         and improvement > paired.standard_error)
+        preserves_active_mae = active is not None and active <= default_active
+        qualifies = clears_se_bar and preserves_active_mae
+        blocked_by = tuple(reason for reason, passed in (
+            ("se_bar", clears_se_bar), ("active_cohort_mae", preserves_active_mae)
+        ) if not passed)
         comparisons.append({
             "candidate": asdict(candidate), "pooled_overall_mae": overall,
             "pooled_active_mae": active, "default_overall_mae": default_mae,
@@ -267,14 +271,23 @@ def select_development_candidate(results: tuple[CandidateResult, ...]) -> Select
             "paired_mean_difference": paired.mean_difference,
             "paired_standard_error": paired.standard_error,
             "paired_gameweeks": paired.gameweek_count, "qualifies": qualifies,
+            "blocked_by": blocked_by,
         })
         if qualifies:
             qualifiers.append(result)
     selected = min(qualifiers, key=lambda result: (
         result.pooled_points["model"].overall.mae, result.candidate
     )).candidate if qualifiers else DEFAULT_CANDIDATE
+    best_challenger = min(comparisons, key=lambda item: (
+        float("inf") if item["pooled_overall_mae"] is None
+        else item["pooled_overall_mae"], item["candidate"]["lookback"],
+        item["candidate"]["half_life"], item["candidate"]["prior_strength"],
+    ), default=None)
     return SelectionDecision(selected, DEFAULT_CANDIDATE, tuple(comparisons),
-                             "lowest_qualifying_mae" if qualifiers else "keep_default")
+                             "lowest_qualifying_mae" if qualifiers else "keep_default",
+                             Candidate(**best_challenger["candidate"])
+                             if best_challenger is not None else None,
+                             best_challenger["blocked_by"] if best_challenger is not None else ())
 
 
 def write_development_report(

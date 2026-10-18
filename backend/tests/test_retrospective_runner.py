@@ -226,6 +226,23 @@ def test_selection_keeps_defaults_unless_one_se_and_active_conditions_met():
     assert single.comparisons[0]["paired_per_gameweek_differences"] == {6: -2.0}
 
 
+def test_selection_reports_which_condition_blocked_the_challenger():
+    default = synthetic_result(runner.DEFAULT_CANDIDATE, 4, 6)
+    cases = (
+        (runner.Candidate(6, 3, 1), 5, 2, ("active_cohort_mae",)),
+        (runner.Candidate(6, 3, 3), 3, 7, ("se_bar",)),
+        (runner.Candidate(6, 6, 1), 5, 5, ("se_bar", "active_cohort_mae")),
+    )
+    for candidate, active_error, inactive_error, expected in cases:
+        challenger = synthetic_result(candidate, active_error, inactive_error)
+        decision = runner.select_development_candidate((default, challenger))
+        assert decision.selected == runner.DEFAULT_CANDIDATE
+        assert decision.best_challenger == candidate
+        assert decision.best_challenger_blocked_by == expected
+        assert decision.comparisons[0]["blocked_by"] == expected
+        assert not decision.comparisons[0]["qualifies"]
+
+
 def test_selection_picks_lowest_overall_mae_among_qualifiers():
     default = synthetic_result(runner.DEFAULT_CANDIDATE, 4, 6)
     good = synthetic_result(runner.Candidate(6, 3, 1), 3, 5)
@@ -234,6 +251,7 @@ def test_selection_picks_lowest_overall_mae_among_qualifiers():
     assert decision.selected == best.candidate
     assert all(item["qualifies"] for item in decision.comparisons)
     assert all(item["paired_standard_error"] == 0 for item in decision.comparisons)
+    assert all(item["blocked_by"] == () for item in decision.comparisons)
 
 
 def test_report_has_parameters_versions_runtime_and_no_player_identifiers(tmp_path):
@@ -256,6 +274,7 @@ def test_report_has_parameters_versions_runtime_and_no_player_identifiers(tmp_pa
     serialized = path.read_text()
     assert "player_id" not in serialized and "player_name" not in serialized
     assert "model_records" not in serialized
+    assert data["selection"]["best_challenger_blocked_by"] == ["se_bar"]
 
 
 def test_single_fold_entrypoint_prints_only_requested_aggregates(monkeypatch, capsys):
@@ -285,14 +304,21 @@ def test_grid_entry_point_runs_18_candidates_and_writes_aggregate_report(
     output = capsys.readouterr()
     assert output.err == ""
     lines = output.out.splitlines()
-    assert len(lines) == 18 + 18 + 2
+    assert len(lines) == 18 + 18 + 20 + 2
     assert all(lines[index].startswith(f"candidate {index + 1} of 18, elapsed seconds: ")
                for index in range(18))
     assert all("pooled overall MAE=" in line and "pooled active-cohort MAE=" in line
                and "bias=" in line and "RMSE=" in line for line in lines[18:36])
-    assert lines[36].startswith("selection: kept defaults ")
-    assert "paired mean difference=" in lines[36] and "standard error=" in lines[36]
-    assert lines[37] == f"aggregate report: {report_path}"
+    assert all(f"default comparison {label} {name}: overall MAE=" in lines[36 + 5 * index + offset]
+               and "active-cohort MAE=" in lines[36 + 5 * index + offset]
+               and "bias=" in lines[36 + 5 * index + offset]
+               and "RMSE=" in lines[36 + 5 * index + offset]
+               for index, label in enumerate(("pooled", "GW6-10", "GW11-15", "GW16-19"))
+               for offset, name in enumerate(("model", *runner.BASELINE_NAMES)))
+    assert lines[56].startswith("selection: kept defaults ")
+    assert ("paired mean difference=" in lines[56] and "standard error=" in lines[56]
+            and "blocked by SE bar" in lines[56])
+    assert lines[57] == f"aggregate report: {report_path}"
 
     report = json.loads(report_path.read_text())
     assert len(report["candidates"]) == 18
@@ -307,5 +333,6 @@ def test_grid_entry_point_runs_18_candidates_and_writes_aggregate_report(
     assert report["selection"]["selected"] == {
         "lookback": 12, "half_life": 6, "prior_strength": 3,
     }
+    assert "se_bar" in report["selection"]["best_challenger_blocked_by"]
     assert "player_id" not in output.out + report_path.read_text()
     assert "player_name" not in output.out + report_path.read_text()
