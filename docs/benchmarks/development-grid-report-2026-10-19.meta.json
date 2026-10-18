@@ -1,0 +1,33 @@
+{
+  "archive_source_commit": "9779cdbc0c07f6c900c2d0c181ddf6bb9c800f88",
+  "archive_sha256": {
+    "fixtures.csv": "2d7e3950d346df14ca486cb09e9b9ba406d37d943775244eed06cdc021ffb3a9",
+    "merged_gw.csv": "0d09f1f1cb1b5520ec8e2f25238aa652efe2a263d8ca7cb2b6538b27bf86727d",
+    "players_raw.csv": "412ce0172016f8f98f25177dc6de9f3cd2a8ec7a6135f9aa638d7fdee784d67b",
+    "teams.csv": "b29df099cb0ad25413e284e53116099b0e0496874f99743dbc0870d8241b46c5"
+  },
+  "grid_run_commit": "652108d549e045d175e677e6fe2156d05bc5aac1",
+  "grid_run_commit_evidence": "Owner supplied the run commit; the original report did not record it.",
+  "j34_eight_week_clock_starts": "Date the commit containing this report is pushed to the public remote.",
+  "j34_selection_rule": "Keep 12/6/3 unless a candidate beats pooled development overall MAE by more than one paired-gameweek standard error without worsening active-cohort MAE. Among candidates that clear this rule, choose the lowest pooled overall MAE.",
+  "model_version": "empirical-fixture-v1",
+  "original_run_report_sha256": "2b853f6883321f1d7086ec3739a9d003e60fb770d4f6d071b259a71f4ee016bf",
+  "post_run_reporting": {
+    "code_commit": "052858ed51e50c7ad675cf77962c88bf919e73c8",
+    "grid_rerun": false,
+    "selection_reason_fields_added_after_run": [
+      "selection.best_challenger",
+      "selection.best_challenger_blocked_by",
+      "selection.comparisons[].blocked_by"
+    ],
+    "selection_reason_derivation": "Derived from each saved comparison's pooled improvement, paired standard error, pooled active-cohort MAE and default active-cohort MAE; checked against the saved qualifies value.",
+    "baseline_comparison_presentation_added_after_run": true,
+    "baseline_comparison_derivation": "The pooled and per-fold baseline metric fields were already in the original report; the later code only added their printed comparison. No baseline metrics were recomputed."
+  },
+  "public_remote_push": "not_yet_pushed",
+  "report_sha256": "06aa9f58f0d8f1d8025062e5ed6dabaab8358c3344903673b650ccc80450f9d4",
+  "report_version": "development-fold-v1",
+  "rules_version": "fpl-2025-v1",
+  "scoring_adapter_version": "fpl-defensive-contribution-v1",
+  "parameters_frozen": false
+}
