@@ -4,6 +4,8 @@ Personalized Fantasy Premier League transfer/squad optimizer. The private full s
 
 The v1 redesign and its reasons are recorded in `docs/spec/AMENDMENTS.md`. The twelve HTML sections contain the implementation contract; keep them consistent with that record. A specification requirement is not proof that a feature has been built.
 
+When available, check `docs/spec/DECISIONS.md` for high-level project decisions. Add only choices that materially change product direction, main system boundaries, first-release scope or the evidence required for a major feature; keep smaller design and implementation choices in `AMENDMENTS.md` or `HANDOFF.md`. The decision log is private and ignored by Git. Update the relevant specification section when a decision changes the contract; a logged decision is not proof of implementation.
+
 **Check `HANDOFF.md` for current progress before starting any task.** It tracks what's actually done (not just planned), known issues, and deviations from the spec. Update it before finishing a task — check off what's done, note anything unexpected, log which tool did the work.
 
 ## Stack
