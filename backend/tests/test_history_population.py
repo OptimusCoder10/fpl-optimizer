@@ -7,7 +7,7 @@ from itertools import count
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fpl_optimizer.db.advisory_lock import ingestion_lock
@@ -201,6 +201,103 @@ async def test_history_log_contains_no_player_ids_names_urls_or_credentials(
     log_text = history_lines[0]
     for private_value in (*map(str, player_ids), *player_names, url, credential):
         assert private_value not in log_text
+
+
+async def test_history_statement_counts_exact_for_known_player(
+    population, publication_settings, caplog,
+):
+    factory, season, clock, _, _ = population
+
+    async def fetch(player_id):
+        clock.advance(timedelta(seconds=2))
+        payload = load_json_fixture("element_summary_5.json")
+        for row in payload["history"]:
+            row["element"] = player_id
+        return payload
+
+    with caplog.at_level(logging.INFO, logger="fpl_optimizer"):
+        result = await history_population.populate_history(
+            factory, season, fetch, clock=clock.now, budget=timedelta(seconds=1),
+            elapsed_clock=clock.monotonic, settings=publication_settings,
+            db_diagnostics=True,
+        )
+    line = next(record.message for record in caplog.records
+                if record.message.startswith("History population:"))
+    assert (result.succeeded, result.pending) == (1, 1)
+    assert "stmts_commit_avg=15.000 stmts_commit_max=15" in line
+    assert "stmts_other_avg=15.000" in line
+
+
+async def test_history_db_ping_uses_injected_clock(
+    population, publication_settings, caplog,
+):
+    factory, season, clock, _, _ = population
+    samples = iter((1, 2, 3, 4, 5))
+
+    def advance_ping(_connection, _cursor, statement, _parameters, _context,
+                     _executemany):
+        if statement.strip() == "SELECT 1":
+            clock.advance(timedelta(milliseconds=next(samples)))
+
+    engine = factory.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", advance_ping)
+    try:
+        with caplog.at_level(logging.INFO, logger="fpl_optimizer"):
+            await history_population.populate_history(
+                factory, season, FakeFetcher(), clock=clock.now,
+                budget=timedelta(0), elapsed_clock=clock.monotonic,
+                settings=publication_settings, db_diagnostics=True,
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", advance_ping)
+    line = next(record.message for record in caplog.records
+                if record.message.startswith("History population:"))
+    assert "db_ping_ms=3.000" in line
+
+
+async def test_history_diagnostic_log_excludes_sql_ids_and_hosts(
+    migrated_test_engine, publication_settings, caplog,
+):
+    year = next(SEASONS)
+    season = f"{year}-{str(year + 1)[-2:]}"
+    factory = create_session_factory(migrated_test_engine)
+    catalog = {
+        "bootstrap": load_json_fixture("bootstrap_static.json"),
+        "fixtures": load_json_fixture("fixtures.json"),
+    }
+    player_ids = (910001, 920002)
+    player_names = ("Private Alpha", "Private Beta")
+    for player, player_id, name in zip(
+        catalog["bootstrap"]["elements"], player_ids, player_names, strict=True,
+    ):
+        player["id"] = player_id
+        player["web_name"] = name
+    await publish_shared_catalog(
+        factory, SharedCatalogEnvelope.model_validate(catalog),
+        shared_publication(season), settings=publication_settings,
+    )
+    clock = FakeClock()
+
+    async def fetch(player_id):
+        payload = load_json_fixture("element_summary_5.json")
+        for row in payload["history"]:
+            row["element"] = player_id
+        return payload
+
+    with caplog.at_level(logging.INFO, logger="fpl_optimizer"):
+        await history_population.populate_history(
+            factory, season, fetch, clock=clock.now,
+            budget=timedelta(minutes=10), elapsed_clock=clock.monotonic,
+            settings=publication_settings, db_diagnostics=True,
+        )
+    line = next(record.message for record in caplog.records
+                if record.message.startswith("History population:"))
+    assert "db_ping_ms=" in line
+    test_db_url = migrated_test_engine.url
+    for private_value in ("SELECT", "INSERT", "UPDATE", "history/player/",
+                          season, test_db_url.host, "localhost", test_db_url.password,
+                          *map(str, player_ids), *player_names):
+        assert private_value not in line
 
 
 async def test_a_fails_b_commits_and_restart_honours_backoff(population):

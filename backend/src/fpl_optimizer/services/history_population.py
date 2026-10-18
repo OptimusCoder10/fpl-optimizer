@@ -7,13 +7,15 @@ fresh complete envelope; the HTTP adapter supplies safe failure categories.
 """
 
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
+from statistics import median
 from time import monotonic
 from typing import Literal
 
-from sqlalchemy import Integer, cast, func, select, update
+from sqlalchemy import Integer, cast, event, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,6 +34,50 @@ from fpl_optimizer.services import player_history
 logger = logging.getLogger(__name__)
 REFRESH_INTERVAL = timedelta(days=1)
 HISTORY_AGE_LIMIT = timedelta(hours=48)
+
+
+class _StatementCounts:
+    """Count executed statements only; never retain SQL or bound values."""
+
+    def __init__(self, session_factory, lock_connection):
+        self.engines = (
+            session_factory.kw["bind"].sync_engine,
+            lock_connection.sync_connection.engine,
+        )
+        self.phase = "other"
+        self.other = 0
+        self.commit = 0
+        self.player_commits: list[int] = []
+
+    def _count(self, _connection, _cursor, _statement, _parameters, _context,
+               _executemany):
+        if self.phase == "other":
+            self.other += 1
+        elif self.phase == "commit":
+            self.commit += 1
+
+    @contextmanager
+    def attached(self):
+        for engine in self.engines:
+            event.listen(engine, "before_cursor_execute", self._count)
+        try:
+            yield
+        finally:
+            for engine in self.engines:
+                event.remove(engine, "before_cursor_execute", self._count)
+
+    async def ping_ms(self, session_factory, elapsed_clock):
+        samples = []
+        self.phase = "ping"
+        try:
+            async with session_factory() as session:
+                for _ in range(5):
+                    started = elapsed_clock()
+                    await session.execute(text("SELECT 1"))
+                    samples.append(max(0.0, elapsed_clock() - started) * 1000)
+        finally:
+            self.phase = "other"
+        return median(samples)
 
 
 def _utc(value: datetime) -> datetime:
@@ -105,6 +151,7 @@ async def populate_history(
     elapsed_clock: Callable[[], float] = monotonic,
     pacing_elapsed: Callable[[], float] = lambda: 0.0,
     settings: Settings | None = None,
+    db_diagnostics: bool = False,
 ) -> PopulationResult | None:
     """Hold the ingestion lock for the run, with one atomic publish per player.
 
@@ -124,7 +171,7 @@ async def populate_history(
         return await _populate_history_locked(
             session_factory, season_id, fetcher, lock_connection=lock_connection,
             clock=clock, budget=budget, elapsed_clock=elapsed_clock, started=started,
-            pacing_elapsed=pacing_elapsed,
+            pacing_elapsed=pacing_elapsed, db_diagnostics=db_diagnostics,
         )
 
 
@@ -132,8 +179,31 @@ async def _populate_history_locked(
     session_factory, season_id, fetcher, *, lock_connection,
     clock, budget, elapsed_clock=monotonic, started=None,
     pacing_elapsed=lambda: 0.0,
+    db_diagnostics=False,
 ) -> PopulationResult:
     """Existing runner under a caller-held ingestion lock (no nested acquisition)."""
+    counts = _StatementCounts(session_factory, lock_connection) if db_diagnostics else None
+    if counts is None:
+        return await _populate_history_body(
+            session_factory, season_id, fetcher, lock_connection=lock_connection,
+            clock=clock, budget=budget, elapsed_clock=elapsed_clock,
+            started=started, pacing_elapsed=pacing_elapsed,
+        )
+    with counts.attached():
+        ping_ms = await counts.ping_ms(session_factory, elapsed_clock)
+        return await _populate_history_body(
+            session_factory, season_id, fetcher, lock_connection=lock_connection,
+            clock=clock, budget=budget, elapsed_clock=elapsed_clock,
+            started=started, pacing_elapsed=pacing_elapsed,
+            counts=counts, ping_ms=ping_ms,
+        )
+
+
+async def _populate_history_body(
+    session_factory, season_id, fetcher, *, lock_connection,
+    clock, budget, elapsed_clock=monotonic, started=None,
+    pacing_elapsed=lambda: 0.0, counts=None, ping_ms=None,
+) -> PopulationResult:
     if budget < timedelta(0):
         raise ValueError("history budget must be nonnegative")
     if started is None:
@@ -186,9 +256,13 @@ async def _populate_history_locked(
         try:
             fetch_started = elapsed_clock()
             pacing_started = pacing_elapsed()
+            if counts is not None:
+                counts.phase = "fetch"
             try:
                 raw = await fetcher(player_id)
             finally:
+                if counts is not None:
+                    counts.phase = "other"
                 elapsed = max(0.0, elapsed_clock() - fetch_started)
                 pacing = max(0.0, pacing_elapsed() - pacing_started)
                 pacing = min(pacing, elapsed)
@@ -216,6 +290,10 @@ async def _populate_history_locked(
             # and intentionally bypasses this handler.
             envelope = None
         else:
+            committed = False
+            if counts is not None:
+                counts.phase = "commit"
+                commit_statements_before = counts.commit
             async with session_factory() as session:
                 # Configuration/lock errors stop the run, not player retries.
                 await require_same_database(
@@ -245,12 +323,20 @@ async def _populate_history_locked(
                     )
                 else:
                     succeeded += 1
-                    continue
+                    committed = True
+            if counts is not None:
+                counts.player_commits.append(counts.commit - commit_statements_before)
+                counts.phase = "other"
+            if committed:
+                continue
         finally:
             if commit_started is not None:
                 commit = max(0.0, elapsed_clock() - commit_started)
                 commit_seconds += commit
                 max_commit = max(max_commit, commit)
+            if counts is not None and counts.phase == "commit":
+                counts.player_commits.append(counts.commit - commit_statements_before)
+                counts.phase = "other"
 
         # Separate short transaction after rollback; never overwrite success,
         # source time, coverage, rows, or publication versions on failure.
@@ -288,15 +374,30 @@ async def _populate_history_locked(
     )
     other_seconds = max(0.0, elapsed_clock() - run_started - fetch_seconds
                         - pacing_seconds - commit_seconds)
-    logger.info(
+    message = (
         "History population: success=%d failed=%d pending=%d required=%d "
         "fetch_s=%.3f pacing_s=%.3f commit_s=%.3f other_s=%.3f "
-        "fetch_avg_s=%.3f fetch_max_s=%.3f commit_avg_s=%.3f commit_max_s=%.3f",
+        "fetch_avg_s=%.3f fetch_max_s=%.3f commit_avg_s=%.3f commit_max_s=%.3f"
+    )
+    values = (
         result.succeeded, result.failed, result.pending, result.required,
         fetch_seconds, pacing_seconds, commit_seconds, other_seconds,
         fetch_seconds / attempted if attempted else 0.0, max_fetch,
         commit_seconds / attempted if attempted else 0.0, max_commit,
     )
+    if counts is not None:
+        message += (
+            " db_ping_ms=%.3f stmts_commit_avg=%.3f stmts_commit_max=%d "
+            "stmts_other_avg=%.3f"
+        )
+        values += (
+            ping_ms,
+            sum(counts.player_commits) / len(counts.player_commits)
+            if counts.player_commits else 0.0,
+            max(counts.player_commits, default=0),
+            counts.other / attempted if attempted else 0.0,
+        )
+    logger.info(message, *values)
     return result
 
 

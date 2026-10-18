@@ -120,6 +120,7 @@ async def run_ingestion(
             clock=client.clock, budget=timedelta(seconds=client.remaining()),
             elapsed_clock=client.elapsed_clock,
             pacing_elapsed=lambda: client.player_pacing_seconds,
+            db_diagnostics=True,
         )
         status = ("budget_exhausted" if history.budget_exhausted
                   else "partial" if history.failed else "success")
