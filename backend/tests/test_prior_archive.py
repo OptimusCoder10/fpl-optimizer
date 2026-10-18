@@ -20,6 +20,7 @@ from fpl_optimizer.schemas.prior_archive import (
 )
 from fpl_optimizer.services import prior_archive as service
 from fpl_optimizer.services.player_history import read_player_event_totals, read_player_history
+from fpl_optimizer.services.prior_selection import select_prior
 from fpl_optimizer.services.shared_catalog import publish_shared_catalog
 
 SAMPLE = Path(__file__).parent / "fixtures" / "prior_archive"
@@ -271,6 +272,21 @@ async def test_ambiguous_current_code_and_temporary_prior_never_supply_personal_
                                                   Player.id == 817).values(has_temporary_code=True))
     inputs = await read_sample(archive_db[0], "2026-27", 42)
     assert inputs.personal_rows == () and inputs.personal_reason == "temporary_or_invalid_prior_code"
+
+
+async def test_same_display_name_different_external_codes_never_select_personal_prior(archive_db):
+    archive = await import_sample(archive_db)
+    await current_catalog(archive_db, archive, code=123456789)
+    async with archive_db[0].begin() as session:
+        prior_player = await session.get(Player, (ARCHIVE_SEASON, 817))
+        current_player = await session.get(Player, ("2026-27", 42))
+        current_player.web_name = prior_player.web_name
+        assert current_player.external_code != prior_player.external_code
+    inputs = await read_sample(archive_db[0], "2026-27", 42)
+    result = select_prior(player_id=42, position=4, current_rows=(), previous=inputs)
+    assert inputs.personal_player_id is None
+    assert inputs.personal_reason == "external_code_match_not_one_to_one"
+    assert result.source == "previous_season_position"
 
 
 @pytest.mark.parametrize("failure,reason", [
