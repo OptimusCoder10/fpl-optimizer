@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fpl_optimizer import development_fold
+from fpl_optimizer import development_fold, development_grid
 from fpl_optimizer.services import retrospective_runner as runner
 from fpl_optimizer.services.retrospective_archive import ArchiveCounts, BenchmarkArchive
 from fpl_optimizer.services.retrospective_benchmark import PointMetricRecord, summarize_points
@@ -272,3 +272,40 @@ def test_single_fold_entrypoint_prints_only_requested_aggregates(monkeypatch, ca
     assert payload["scored_player_events"] == 3
     assert payload["excluded_count"] == 0
     assert "player_id" not in output.out and "player_name" not in output.out
+
+
+def test_grid_entry_point_runs_18_candidates_and_writes_aggregate_report(
+    monkeypatch, capsys, tmp_path,
+):
+    monkeypatch.setattr(development_grid.DevelopmentView, "load",
+                        lambda _directory: view())
+    report_path = tmp_path / "development-grid.json"
+    assert development_grid.main(["unused", "--output", str(report_path)]) == 0
+
+    output = capsys.readouterr()
+    assert output.err == ""
+    lines = output.out.splitlines()
+    assert len(lines) == 18 + 18 + 2
+    assert all(lines[index].startswith(f"candidate {index + 1} of 18, elapsed seconds: ")
+               for index in range(18))
+    assert all("pooled overall MAE=" in line and "pooled active-cohort MAE=" in line
+               and "bias=" in line and "RMSE=" in line for line in lines[18:36])
+    assert lines[36].startswith("selection: kept defaults ")
+    assert "paired mean difference=" in lines[36] and "standard error=" in lines[36]
+    assert lines[37] == f"aggregate report: {report_path}"
+
+    report = json.loads(report_path.read_text())
+    assert len(report["candidates"]) == 18
+    assert {tuple(candidate["parameters"][name] for name in
+                  ("lookback", "half_life", "prior_strength"))
+            for candidate in report["candidates"]} == {
+                (candidate.lookback, candidate.half_life, candidate.prior_strength)
+                for candidate in runner.GRID
+            }
+    assert all(len(candidate["folds"]) == 3 for candidate in report["candidates"])
+    assert report["selection"]["reason"] == "keep_default"
+    assert report["selection"]["selected"] == {
+        "lookback": 12, "half_life": 6, "prior_strength": 3,
+    }
+    assert "player_id" not in output.out + report_path.read_text()
+    assert "player_name" not in output.out + report_path.read_text()
