@@ -1,16 +1,19 @@
 """Pure archive-to-benchmark mapping and a sealed development loader.
 
 The existing pinned loader owns checksum, duplicate and scoring validation.
-This adapter reads only the identity, schedule and scoring counts needed by
-BenchmarkRow and BenchmarkFixture. It never reads archive forecast, price,
+The ordinary view reads only the identity, schedule and scoring counts needed
+by BenchmarkRow and BenchmarkFixture. The separate score projection reads only
+cutoff-eligible earlier fixture scores. Neither reads archive forecast, price,
 ownership, availability or raw CSV team fields.
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fpl_optimizer.schemas.prior_archive import ValidatedArchive, load_pinned_archive
 from fpl_optimizer.services.retrospective_cohort import BenchmarkFixture, BenchmarkRow
+from fpl_optimizer.services.retrospective_cohort import cutoff_for_event
 
 DEVELOPMENT_LAST_EVENT = 19
 
@@ -29,6 +32,53 @@ class BenchmarkArchive:
     rows: tuple[BenchmarkRow, ...]
     fixtures: tuple[BenchmarkFixture, ...]
     counts: ArchiveCounts
+
+
+@dataclass(frozen=True)
+class ScoredFixture:
+    """A fixture admitted through one retrospective cutoff, including absent scores."""
+
+    fixture_id: int
+    event: int
+    kickoff_time: datetime
+    home_team_id: int
+    away_team_id: int
+    home_score: int | None
+    away_score: int | None
+
+
+def eligible_scored_fixtures(
+    archive: ValidatedArchive, *, target_event: int,
+) -> tuple[ScoredFixture, ...]:
+    """Expose scores only after the target-event and strict cutoff checks.
+
+    The sealed final period is not a candidate target. Score fields on rejected
+    fixtures are never accessed, including fixtures assigned to the target event.
+    """
+    if not 6 <= target_event <= DEVELOPMENT_LAST_EVENT:
+        raise ValueError("opponent scores require a GW6–19 development target")
+    source = archive.catalog.fixtures.root
+    schedule = tuple(BenchmarkFixture(
+        fixture.id, fixture.event, fixture.kickoff_time, fixture.team_h, fixture.team_a,
+    ) for fixture in source if fixture.event == target_event)
+    cutoff = cutoff_for_event(target_event, schedule)
+    if cutoff.skipped:
+        return ()
+    assert cutoff.cutoff_time is not None
+    admitted = []
+    for fixture in source:
+        if fixture.event is None or fixture.event == target_event:
+            continue
+        kickoff = fixture.kickoff_time
+        if kickoff is None or kickoff + timedelta(hours=3) >= cutoff.cutoff_time:
+            continue
+        admitted.append(ScoredFixture(
+            fixture.id, fixture.event, kickoff, fixture.team_h, fixture.team_a,
+            fixture.team_h_score, fixture.team_a_score,
+        ))
+    return tuple(sorted(admitted, key=lambda fixture: (
+        fixture.kickoff_time, fixture.fixture_id,
+    )))
 
 
 def adapt_validated_archive(
