@@ -1,0 +1,38 @@
+{
+  "frozen_parameters": {
+    "lookback": 12,
+    "half_life": 6,
+    "prior_strength": 3
+  },
+  "scope": {
+    "availability": "neutral (a=1)",
+    "previous_season_rows": "none",
+    "prior": "current-season position only"
+  },
+  "selection_evidence": {
+    "development_report": "development-grid-report-2026-10-19.json",
+    "development_report_sha256": "06aa9f58f0d8f1d8025062e5ed6dabaab8358c3344903673b650ccc80450f9d4",
+    "j34_outcome": "Defaults kept; best challenger 12/12/1 failed the active-cohort gate."
+  },
+  "code_identity": {
+    "grid_run_commit": "652108d549e045d175e677e6fe2156d05bc5aac1",
+    "code_at_freeze": "7e22b6fb41a1e4edf29d31855904df30ca7a8396",
+    "freeze_commit": "the commit containing this record"
+  },
+  "archive_identity": {
+    "source_commit": "9779cdbc0c07f6c900c2d0c181ddf6bb9c800f88",
+    "sha256": {
+      "fixtures.csv": "2d7e3950d346df14ca486cb09e9b9ba406d37d943775244eed06cdc021ffb3a9",
+      "merged_gw.csv": "0d09f1f1cb1b5520ec8e2f25238aa652efe2a263d8ca7cb2b6538b27bf86727d",
+      "players_raw.csv": "412ce0172016f8f98f25177dc6de9f3cd2a8ec7a6135f9aa638d7fdee784d67b",
+      "teams.csv": "b29df099cb0ad25413e284e53116099b0e0496874f99743dbc0870d8241b46c5"
+    }
+  },
+  "versions": {
+    "model": "empirical-fixture-v1",
+    "rules": "fpl-2025-v1",
+    "scoring_adapter": "fpl-defensive-contribution-v1",
+    "report": "development-fold-v1"
+  },
+  "sealed_holdout": "No GW20-38 forecast, error metric or point comparison has been computed. The held-out comparison remains sealed until the opponent candidate is also frozen (J34/J35), subject to the baseline-only fallback on 14 December 2026."
+}
