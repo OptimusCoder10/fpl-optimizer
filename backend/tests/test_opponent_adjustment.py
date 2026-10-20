@@ -347,6 +347,15 @@ def test_wrapper_uses_event_wide_cutoff_not_player_fixture_kickoff():
     assert contaminated == original
 
 
+def test_wrapper_excludes_target_event_fixture_even_with_early_event_cutoff():
+    late_cutoff = target().kickoff_time + timedelta(days=2)
+    target_score = ScoredFixture(101, 6, target().kickoff_time, 1, 2, 999, 0)
+    assert target_score.kickoff_time + timedelta(hours=3) < late_cutoff
+    original = adjusted(event_cutoff=late_cutoff)
+    contaminated = adjusted(history=scores() + (target_score,), event_cutoff=late_cutoff)
+    assert contaminated == original
+
+
 def test_gw20_plus_rows_and_scores_cannot_change_development_outputs(monkeypatch):
     def fixture(identifier, event, kickoff, home_score, away_score):
         return SimpleNamespace(id=identifier, event=event, kickoff_time=kickoff,
@@ -428,3 +437,33 @@ def test_entry_point_refuses_events_after_19(monkeypatch):
     monkeypatch.setattr(development_opponent.DevelopmentView, "load_opponent", forbidden)
     with pytest.raises(ValueError, match="GW6–19"):
         development_opponent.main(["/unused", "--last-event", "20"])
+
+
+def test_entry_point_rejects_altered_freeze_parameters(monkeypatch):
+    changed = {"frozen_parameters": {"lookback": 6, "half_life": 6,
+                                     "prior_strength": 3}}
+    monkeypatch.setattr(development_opponent, "FREEZE", SimpleNamespace(
+        read_text=lambda **_kwargs: json.dumps(changed)))
+
+    def forbidden(_path):
+        raise AssertionError("archive loaded before freeze mismatch was rejected")
+
+    monkeypatch.setattr(development_opponent.DevelopmentView, "load_opponent", forbidden)
+    with pytest.raises(ValueError, match="frozen baseline does not match 12/6/3"):
+        development_opponent.main(["/unused"])
+
+
+def test_eligible_scores_reject_events_outside_gw6_to_19():
+    source = SimpleNamespace(catalog=SimpleNamespace(
+        fixtures=SimpleNamespace(root=())))
+    for event in (5, 20):
+        with pytest.raises(ValueError, match="GW6–19"):
+            eligible_scored_fixtures(source, target_event=event)
+
+
+def test_development_view_rejects_scores_after_gw19():
+    scored_twenty = ScoredFixture(301, 20, T + timedelta(days=10), 1, 2, 9, 8)
+    counts = ArchiveCounts(0, 0, 0, 0, 0)
+    for scores_by_event in ({20: ()}, {6: (scored_twenty,)}):
+        with pytest.raises(ValueError, match="GW1–19 only"):
+            runner.DevelopmentView((), (), counts, (7,), scores_by_event)

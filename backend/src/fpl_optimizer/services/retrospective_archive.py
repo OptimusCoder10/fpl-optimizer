@@ -67,6 +67,7 @@ def eligible_scored_fixtures(
     assert cutoff.cutoff_time is not None
     admitted = []
     for fixture in source:
+        # Defence in depth: the cutoff already excludes every target-event kickoff.
         if (fixture.event is None or fixture.event == target_event
                 or fixture.event > DEVELOPMENT_LAST_EVENT):
             continue
