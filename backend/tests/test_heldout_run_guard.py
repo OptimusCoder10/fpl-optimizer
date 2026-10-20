@@ -109,6 +109,65 @@ def test_guard_refuses_when_git_tree_dirty(setup_guard):
     assert not lock.exists()
 
 
+def test_guard_refuses_lock_path_inside_repo(setup_guard):
+    root, archive, _ = setup_guard
+    inside = root / "heldout-run-lock.json"
+    with pytest.raises(guard.HeldoutGuardError, match="outside the repository"):
+        guard.authorize_heldout_run(guard.AUTHORISATION_PHRASE, archive,
+                                    repo_root=root, lock_path=inside)
+    assert not inside.exists()
+
+
+def test_guard_refuses_when_opponent_freeze_baseline_hash_mismatch(
+        setup_guard, monkeypatch):
+    root, _, lock = setup_guard
+    path = root / "docs/benchmarks/opponent-freeze-2026-10-20.json"
+    record = json.loads(path.read_text())
+    record["baseline_freeze_sha256"] = "0" * 64
+    path.write_text(json.dumps(record))
+    _commit(root, "synthetic opponent baseline reference mismatch")
+    monkeypatch.setattr(guard, "OPPONENT_FREEZE_SHA256", _hash(path.read_bytes()))
+    with pytest.raises(guard.HeldoutGuardError,
+                       match="does not reference the verified baseline freeze"):
+        _run(setup_guard)
+    assert not lock.exists()
+
+
+def test_guard_refuses_when_freeze_versions_differ(setup_guard, monkeypatch):
+    root, _, lock = setup_guard
+    path = root / "docs/benchmarks/opponent-freeze-2026-10-20.json"
+    record = json.loads(path.read_text())
+    record["versions"]["model"] = "different synthetic model"
+    path.write_text(json.dumps(record))
+    _commit(root, "synthetic freeze version mismatch")
+    monkeypatch.setattr(guard, "OPPONENT_FREEZE_SHA256", _hash(path.read_bytes()))
+    with pytest.raises(guard.HeldoutGuardError, match="Frozen model versions disagree"):
+        _run(setup_guard)
+    assert not lock.exists()
+
+
+def test_guard_refuses_when_tree_becomes_dirty_after_verification(
+        setup_guard, monkeypatch):
+    root, _, lock = setup_guard
+    original_sha256 = guard._sha256
+    changed = False
+    def change_during_real_hash(path):
+        nonlocal changed
+        result = original_sha256(path)
+        if path.name == "teams.csv" and not changed:
+            (root / guard.FROZEN_MODULES[0]).write_text("# concurrent synthetic edit\n")
+            changed = True
+        return result
+    monkeypatch.setattr(guard, "_sha256", change_during_real_hash)
+    with pytest.raises(guard.HeldoutGuardError,
+                       match="Git state changed during held-out guard verification"):
+        _run(setup_guard)
+    assert changed
+    assert subprocess.run(["git", "-C", str(root), "status", "--porcelain=v1"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    assert not lock.exists()
+
+
 def test_guard_refuses_when_frozen_module_changed_since_freeze(setup_guard):
     root, _, lock = setup_guard
     (root / guard.FROZEN_MODULES[0]).write_text("# changed\n")

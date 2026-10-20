@@ -1,7 +1,7 @@
 """Synthetic GW20–38 loader and runner checks; no real archive access."""
 
 import ast
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -12,6 +12,10 @@ import pytest
 
 from fpl_optimizer.services import heldout_archive as loader
 from fpl_optimizer.services import heldout_runner as runner
+from fpl_optimizer.services.heldout_adjustment import heldout_adjust_prediction
+from fpl_optimizer.services.opponent_adjustment import adjust_prediction
+from fpl_optimizer.services.prediction_engine import FixtureObservation, predict
+from fpl_optimizer.services.prior_selection import PriorSelection
 from fpl_optimizer.services import retrospective_archive as development_archive
 from fpl_optimizer.services import retrospective_runner as development_runner
 from fpl_optimizer.services.opponent_profiles import league_mean, team_profile
@@ -71,6 +75,21 @@ def test_heldout_view_contains_only_gw20_to_38_targets():
     assert data.cohort(20).cutoff.event == 20
 
 
+def test_heldout_view_rejects_scores_crossing_cutoff():
+    data = view()
+    for invalid in (scored(20, 20, 24), scored(40, 19, 22.5)):
+        scores = {**data.scored_by_event, 20: (invalid,)}
+        with pytest.raises(ValueError, match="score projection crosses its cutoff"):
+            replace(data, scored_by_event=scores)
+
+
+def test_heldout_scored_fixtures_rejects_target_outside_range():
+    archive = source((raw_fixture(19, 19, 1), raw_fixture(20, 20, 24)))
+    for event in (19, 39):
+        with pytest.raises(ValueError, match="GW20–38 target"):
+            loader.heldout_scored_fixtures(archive, target_event=event)
+
+
 def test_heldout_inputs_include_earlier_events_only_by_cutoff_buffer():
     # t(20) = hour 22.5. The hour-19.5 row is exactly on the three-hour edge.
     fixtures = (fixture(1, 19, 1), fixture(2, 19, 19.5),
@@ -124,6 +143,55 @@ def test_heldout_profile_scores_use_event_wide_cutoff():
         source(fixtures), target_event=21)] == [1, 2, 3]
 
 
+def _adjustment_scenario(target_event=20, target_ids=(101, 102)):
+    historical_rows = tuple(BenchmarkRow(
+        7, identifier, 19, START + timedelta(days=identifier), True, 2, 90,
+        goals_scored=1, assists=1, clean_sheets=1,
+    ) for identifier in range(17, 21))
+    history = tuple(ScoredFixture(
+        identifier, 19, START + timedelta(days=identifier), 1, 2, 2, 1,
+    ) for identifier in range(1, 21))
+    selected_prior = PriorSelection("personal_current_only", 0, None, (), 4)
+    prediction = predict(
+        personal_rows=(FixtureObservation(r.fixture_id, r.kickoff_time, r)
+                       for r in historical_rows),
+        prior=selected_prior, position=2, target_fixture_ids=target_ids,
+        catalog_trusted=True, chance=None, status="a", owned=False,
+        rules_version="synthetic", input_version="synthetic",
+    )
+    target_time = START + timedelta(days=30)
+    targets = tuple(BenchmarkFixture(identifier, target_event, target_time,
+                                     2 if identifier == 101 else 1,
+                                     1 if identifier == 101 else 99)
+                    for identifier in target_ids)
+    kwargs = dict(player_rows=historical_rows, prior=selected_prior,
+                  target_fixtures=targets, club_id=1, scored_fixtures=history,
+                  event_cutoff=target_time - timedelta(minutes=90),
+                  setting=(12, 12), half_life=6, prior_strength=3, window_size=12)
+    return prediction, kwargs
+
+
+def test_heldout_adjustment_rejects_target_outside_gw20_to_38():
+    for event in (19, 39):
+        forecast, kwargs = _adjustment_scenario(event, (101,))
+        with pytest.raises(ValueError, match="one GW20–38 target event"):
+            heldout_adjust_prediction(forecast, **kwargs)
+
+
+def test_heldout_adjustment_matches_frozen_adjustment_on_shared_scenario():
+    forecast, kwargs = _adjustment_scenario()
+    heldout = heldout_adjust_prediction(forecast, **kwargs)
+    frozen = adjust_prediction(forecast, **kwargs)
+    assert asdict(heldout) == asdict(frozen)
+    assert len(heldout.fixtures) == 2
+    assert heldout.fixtures[0].attack != 1
+    assert heldout.fixtures[1].reason == "under_three_scored_fixtures"
+    blank, blank_kwargs = _adjustment_scenario(target_ids=())
+    assert blank.status == "blank"
+    assert asdict(heldout_adjust_prediction(blank, **blank_kwargs)) == asdict(
+        adjust_prediction(blank, **blank_kwargs))
+
+
 def test_heldout_future_perturbation_changes_nothing(monkeypatch):
     base = view()
     changed_rows = tuple(replace(r, goals_scored=999, minutes=0)
@@ -174,6 +242,8 @@ def test_heldout_future_perturbation_changes_nothing(monkeypatch):
 
 
 def test_heldout_runner_refuses_without_guard_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / "fpl-benchmark-reports").mkdir()
     def refuse(*args, **kwargs):
         raise runner.HeldoutGuardError("synthetic refusal")
     monkeypatch.setattr(runner, "authorize_heldout_run", refuse)
@@ -181,7 +251,12 @@ def test_heldout_runner_refuses_without_guard_success(tmp_path, monkeypatch):
     with pytest.raises(runner.HeldoutGuardError, match="synthetic refusal"):
         runner.run_heldout_once("unused", tmp_path, repo_root=tmp_path,
                                 lock_path=tmp_path / "heldout-run-lock.json")
-    monkeypatch.setattr(runner, "authorize_heldout_run", lambda *a, **k: {})
+    monkeypatch.setattr(runner, "authorize_heldout_run",
+                        lambda *a, **k: {"baseline_freeze_sha256": "a",
+                                         "opponent_freeze_sha256": "b"})
+    monkeypatch.setattr(runner, "parameters_from_verified_freezes", lambda *a: FROZEN)
+    monkeypatch.setattr(runner, "compare_frozen", lambda *a: {})
+    monkeypatch.setattr(runner.HeldoutView, "load", lambda *_: view())
     with pytest.raises(runner.HeldoutGuardError, match="without its one-time lock"):
         runner.run_heldout_once("unused", tmp_path, repo_root=tmp_path,
                                 lock_path=tmp_path / "heldout-run-lock.json")
@@ -198,6 +273,82 @@ def test_heldout_runner_refuses_without_guard_success(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "heldout-run-failure.json").read_text()) == {
         "category": "invalid_freeze"}
     assert lock.read_text() == "synthetic lock"
+
+
+def test_runner_refuses_when_lock_missing_after_guard(tmp_path, monkeypatch):
+    (tmp_path / "fpl-benchmark-reports").mkdir()
+    monkeypatch.setattr(runner, "authorize_heldout_run",
+                        lambda *a, **k: {"baseline_freeze_sha256": "a",
+                                         "opponent_freeze_sha256": "b"})
+    monkeypatch.setattr(runner, "parameters_from_verified_freezes", lambda *a: FROZEN)
+    monkeypatch.setattr(runner.HeldoutView, "load", lambda *_: view())
+    monkeypatch.setattr(runner, "compare_frozen", lambda *a: {})
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    lock = tmp_path / "heldout-run-lock.json"
+    with pytest.raises(runner.HeldoutGuardError, match="without its one-time lock"):
+        runner.run_heldout_once("synthetic", tmp_path, repo_root=tmp_path, lock_path=lock)
+    assert not lock.exists()
+    assert not (tmp_path / "fpl-benchmark-reports" / runner.REPORT_NAME).exists()
+
+
+def test_compare_frozen_rejects_non_heldout_view():
+    data = view()
+    wrong = SimpleNamespace(**vars(data), cohort=data.cohort)
+    with pytest.raises(TypeError, match="requires HeldoutView"):
+        runner.compare_frozen(wrong, FROZEN)
+
+
+def test_compare_frozen_rejects_non_frozen_parameters():
+    with pytest.raises(ValueError, match="only the two frozen parameter sets"):
+        runner.compare_frozen(view(), runner.FrozenParameters(6, 6, 3, (12, 12)))
+
+
+def test_freeze_reader_rejects_disagreeing_baseline_records(tmp_path):
+    folder = tmp_path / "docs/benchmarks"
+    folder.mkdir(parents=True)
+    baseline = {"lookback": 12, "half_life": 6, "prior_strength": 3}
+    (folder / "baseline-freeze-2026-10-19.json").write_text(json.dumps({
+        "frozen_parameters": baseline}))
+    (folder / "opponent-freeze-2026-10-20.json").write_text(json.dumps({
+        "baseline_parameters": baseline | {"lookback": 11},
+        "frozen_parameters": {"L": 12, "lambda": 12},
+    }))
+    hashes = tuple(hashlib.sha256((folder / name).read_bytes()).hexdigest()
+                   for name in ("baseline-freeze-2026-10-19.json",
+                                "opponent-freeze-2026-10-20.json"))
+    with pytest.raises(ValueError, match="frozen baseline parameter records disagree"):
+        runner.parameters_from_verified_freezes(tmp_path, hashes)
+
+
+def test_runner_refuses_when_report_destination_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "authorize_heldout_run",
+                        lambda *a, **k: {"baseline_freeze_sha256": "a",
+                                         "opponent_freeze_sha256": "b"})
+    monkeypatch.setattr(runner, "parameters_from_verified_freezes", lambda *a: FROZEN)
+    monkeypatch.setattr(runner.HeldoutView, "load", lambda *_: view())
+    monkeypatch.setattr(runner, "compare_frozen", lambda *a: {})
+    original_open = Path.open
+    for index, suffix in enumerate(("", ".incomplete")):
+        home = tmp_path / str(index)
+        folder = home / "fpl-benchmark-reports"
+        folder.mkdir(parents=True)
+        lock = folder / "heldout-run-lock.json"
+        lock.write_bytes(b"synthetic lock")
+        existing = folder / (runner.REPORT_NAME + suffix)
+        existing.write_bytes(b"existing report")
+        monkeypatch.setattr(Path, "home", lambda home=home: home)
+        def checked_open(path, *args, **kwargs):
+            if suffix and path == existing:
+                raise AssertionError("incomplete report must be refused before opening")
+            return original_open(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "open", checked_open)
+        with pytest.raises(FileExistsError, match="held-out report already exists"):
+            runner.run_heldout_once("synthetic", home, repo_root=home, lock_path=lock)
+        monkeypatch.setattr(Path, "open", original_open)
+        assert existing.read_bytes() == b"existing report"
+        assert lock.read_bytes() == b"synthetic lock"
+        assert json.loads((folder / "heldout-run-failure.json").read_text()) == {
+            "category": "report_exists"}
 
 
 def test_heldout_runner_reads_parameters_only_from_freeze_files(tmp_path):
