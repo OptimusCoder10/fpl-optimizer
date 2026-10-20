@@ -67,7 +67,8 @@ def eligible_scored_fixtures(
     assert cutoff.cutoff_time is not None
     admitted = []
     for fixture in source:
-        if fixture.event is None or fixture.event == target_event:
+        if (fixture.event is None or fixture.event == target_event
+                or fixture.event > DEVELOPMENT_LAST_EVENT):
             continue
         kickoff = fixture.kickoff_time
         if kickoff is None or kickoff + timedelta(hours=3) >= cutoff.cutoff_time:

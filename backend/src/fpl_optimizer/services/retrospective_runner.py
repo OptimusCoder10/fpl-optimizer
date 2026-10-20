@@ -1,6 +1,6 @@
 """Development-only retrospective folds; no final-period evaluation entry point."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 import math
 from pathlib import Path
@@ -13,9 +13,12 @@ from fpl_optimizer.schemas.prior_archive import (
 from fpl_optimizer.services.prediction_engine import (
     MODEL_VERSION, FixtureObservation, predict,
 )
+from fpl_optimizer.services.opponent_adjustment import adjust_prediction
+from fpl_optimizer.services.opponent_profiles import SETTINGS as OPPONENT_SETTINGS
 from fpl_optimizer.services.prior_selection import REQUIRED_COUNTS, select_prior
 from fpl_optimizer.services.retrospective_archive import (
-    DEVELOPMENT_LAST_EVENT, ArchiveCounts, adapt_validated_archive,
+    DEVELOPMENT_LAST_EVENT, ArchiveCounts, ScoredFixture, adapt_validated_archive,
+    eligible_scored_fixtures,
 )
 from fpl_optimizer.services.retrospective_benchmark import (
     ModelMinuteRecord, PlayedFixtureMinutes, PointMetricRecord,
@@ -41,6 +44,7 @@ class DevelopmentView:
     fixtures: tuple[BenchmarkFixture, ...]
     counts: ArchiveCounts
     player_ids: tuple[int, ...]
+    scored_by_event: dict[int, tuple[ScoredFixture, ...]] | None = None
 
     def __post_init__(self) -> None:
         if (not self.player_ids or any(row.event < 1 or row.event > DEVELOPMENT_LAST_EVENT
@@ -49,6 +53,13 @@ class DevelopmentView:
                     for fixture in self.fixtures
                 )):
             raise ValueError("development view requires player IDs and GW1–19 only")
+        if self.scored_by_event is not None and (
+            any(not 6 <= event <= DEVELOPMENT_LAST_EVENT
+                for event in self.scored_by_event)
+            or any(fixture.event > DEVELOPMENT_LAST_EVENT
+                   for fixtures in self.scored_by_event.values() for fixture in fixtures)
+        ):
+            raise ValueError("development opponent scores require GW1–19 only")
 
     @classmethod
     def load(cls, directory: Path) -> "DevelopmentView":
@@ -57,6 +68,17 @@ class DevelopmentView:
         mapped = adapt_validated_archive(source, through_event=DEVELOPMENT_LAST_EVENT)
         return cls(mapped.rows, mapped.fixtures, mapped.counts,
                    tuple(sorted(player.id for player in source.catalog.bootstrap.elements)))
+
+    @classmethod
+    def load_opponent(cls, directory: Path) -> "DevelopmentView":
+        """Keep only cutoff eligible score projections for development events."""
+        source = load_pinned_archive(directory)
+        mapped = adapt_validated_archive(source, through_event=DEVELOPMENT_LAST_EVENT)
+        scores = {event: eligible_scored_fixtures(source, target_event=event)
+                  for event in range(6, DEVELOPMENT_LAST_EVENT + 1)}
+        return cls(mapped.rows, mapped.fixtures, mapped.counts,
+                   tuple(sorted(player.id for player in source.catalog.bootstrap.elements)),
+                   scores)
 
 
 @dataclass(frozen=True, order=True)
@@ -86,6 +108,7 @@ class FoldResult:
     model_minutes: object
     per_gameweek_mae: dict[int, float]
     runtime_seconds: float
+    opponent_context_reasons: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -110,6 +133,23 @@ class SelectionDecision:
     best_challenger_blocked_by: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class OpponentResult:
+    setting: tuple[int, int]
+    folds: tuple[FoldResult, ...]
+    pooled_points: dict[str, object]
+    pooled_model_minutes: object
+    pooled_per_gameweek_mae: dict[int, float]
+    model_records: tuple[PointMetricRecord, ...]
+
+
+@dataclass(frozen=True)
+class OpponentSelection:
+    selected: tuple[int, int] | None
+    comparisons: tuple[dict[str, object], ...]
+    reason: str
+
+
 def _prior_row(row: BenchmarkRow) -> SimpleNamespace:
     return SimpleNamespace(
         player_id=row.player_id, position=row.position,
@@ -123,13 +163,18 @@ _NO_PREVIOUS = SimpleNamespace(
 )
 
 
-def _run_events(view: DevelopmentView, candidate: Candidate, first: int, last: int):
+def _run_events(view: DevelopmentView, candidate: Candidate, first: int, last: int,
+                opponent_setting: tuple[int, int] | None = None):
     if not isinstance(view, DevelopmentView):
         raise TypeError("runner requires a DevelopmentView")
     if (first, last) not in DEVELOPMENT_FOLDS:
         raise ValueError("only declared development folds can be scored")
     if candidate not in GRID:
         raise ValueError("candidate must be in the declared development grid")
+    if opponent_setting is not None and (
+        opponent_setting not in OPPONENT_SETTINGS or view.scored_by_event is None
+    ):
+        raise ValueError("opponent setting requires declared setting and cutoff scores")
     started = perf_counter()
     point_records: dict[str, list[PointMetricRecord]] = {
         name: [] for name in ("model", *BASELINE_NAMES)
@@ -137,6 +182,7 @@ def _run_events(view: DevelopmentView, candidate: Candidate, first: int, last: i
     minute_records: list[ModelMinuteRecord] = []
     skipped: dict[str, int] = {}
     exclusions: dict[str, int] = {}
+    context_reasons: dict[str, int] = {}
     first_time = position_differences = events_scored = 0
     target_rows: dict[tuple[int, int], BenchmarkRow] = {
         (row.player_id, row.fixture_id): row for row in view.rows
@@ -175,6 +221,28 @@ def _run_events(view: DevelopmentView, candidate: Candidate, first: int, last: i
                 prior_strength=candidate.prior_strength,
                 window_size=candidate.lookback,
             )
+            if opponent_setting is not None:
+                adjustment = adjust_prediction(
+                    forecast, player_rows=player.eligible_rows, prior=prior,
+                    target_fixtures=(fixture for fixture in view.fixtures
+                                     if fixture.fixture_id in player.scheduled_fixture_ids),
+                    club_id=player.last_eligible_club_id,
+                    scored_fixtures=view.scored_by_event[event],
+                    event_cutoff=cohort.cutoff.cutoff_time,
+                    setting=opponent_setting, half_life=candidate.half_life,
+                    prior_strength=candidate.prior_strength,
+                    window_size=candidate.lookback,
+                )
+                forecast = adjustment.prediction
+                for detail in adjustment.fixtures:
+                    if detail.reason is not None:
+                        context_reasons[detail.reason] = context_reasons.get(detail.reason, 0) + 1
+                    if detail.home_reason is not None:
+                        context_reasons[detail.home_reason] = (
+                            context_reasons.get(detail.home_reason, 0) + 1)
+                if adjustment.kappa_reason is not None:
+                    context_reasons[adjustment.kappa_reason] = (
+                        context_reasons.get(adjustment.kappa_reason, 0) + 1)
             values = {
                 "model": forecast.event_mean,
                 "zero": zero_baseline(player),
@@ -202,6 +270,7 @@ def _run_events(view: DevelopmentView, candidate: Candidate, first: int, last: i
         first, last, events_scored, skipped, first_time, exclusions,
         position_differences, summaries, summarize_model_minutes(minute_records),
         gameweek_mae(point_records["model"]), perf_counter() - started,
+        context_reasons,
     )
     return fold, point_records, minute_records
 
@@ -235,6 +304,106 @@ def run_development_candidate(view: DevelopmentView, candidate: Candidate) -> Ca
 def run_development_grid(view: DevelopmentView) -> tuple[CandidateResult, ...]:
     """Run the declared grid; call only after the single-fold timing is reviewed."""
     return tuple(run_development_candidate(view, candidate) for candidate in GRID)
+
+
+def run_opponent_candidate(view: DevelopmentView,
+                           setting: tuple[int, int]) -> OpponentResult:
+    """Development-only J35 candidate on the frozen baseline parameters."""
+    if setting not in OPPONENT_SETTINGS:
+        raise ValueError("setting must be one of the four declared J35 settings")
+    folds = []
+    all_points = {name: [] for name in ("model", *BASELINE_NAMES)}
+    all_minutes = []
+    for first, last in DEVELOPMENT_FOLDS:
+        fold, points, minutes = _run_events(view, DEFAULT_CANDIDATE, first, last,
+                                            opponent_setting=setting)
+        folds.append(fold)
+        for name, records in points.items():
+            all_points[name].extend(records)
+        all_minutes.extend(minutes)
+    return OpponentResult(
+        setting, tuple(folds),
+        {name: summarize_points(records) for name, records in all_points.items()},
+        summarize_model_minutes(all_minutes), gameweek_mae(all_points["model"]),
+        tuple(all_points["model"]),
+    )
+
+
+def select_opponent_candidate(baseline: CandidateResult,
+                              candidates: tuple[OpponentResult, ...]) -> OpponentSelection:
+    """Require both J35 gates, then rank by overall, active, L and lambda."""
+    if baseline.candidate != DEFAULT_CANDIDATE:
+        raise ValueError("opponent comparison requires frozen 12/6/3 baseline")
+    if len(candidates) != len(OPPONENT_SETTINGS) or {
+        candidate.setting for candidate in candidates
+    } != OPPONENT_SETTINGS:
+        raise ValueError("all four declared opponent settings are required")
+    base_points = baseline.pooled_points["model"]
+    comparisons = []
+    qualified = []
+    for result in sorted(candidates, key=lambda item: item.setting):
+        points = result.pooled_points["model"]
+        paired = paired_gameweek_mae_difference(result.model_records,
+                                                baseline.model_records)
+        overall = points.overall.mae
+        active = points.active_overall.mae
+        base_overall = base_points.overall.mae
+        base_active = base_points.active_overall.mae
+        se_gate = (overall is not None and base_overall is not None
+                   and paired.standard_error is not None
+                   and base_overall - overall > paired.standard_error)
+        active_gate = (active is not None and base_active is not None
+                       and active < base_active)
+        qualifies = se_gate and active_gate
+        comparisons.append({
+            "setting": result.setting, "pooled_overall_mae": overall,
+            "pooled_active_mae": active, "baseline_overall_mae": base_overall,
+            "baseline_active_mae": base_active,
+            "paired_per_gameweek_differences": paired.per_gameweek,
+            "paired_standard_error": paired.standard_error,
+            "passes_se_gate": se_gate, "passes_active_gate": active_gate,
+            "qualifies": qualifies,
+        })
+        if qualifies:
+            qualified.append(result)
+    selected = min(qualified, key=lambda item: (
+        item.pooled_points["model"].overall.mae,
+        item.pooled_points["model"].active_overall.mae,
+        item.setting,
+    )).setting if qualified else None
+    return OpponentSelection(selected, tuple(comparisons),
+                             "lowest_qualifying_mae" if qualified else "no_qualifier")
+
+
+def write_opponent_report(baseline: CandidateResult,
+                          candidates: tuple[OpponentResult, ...], counts: ArchiveCounts,
+                          *, path: Path) -> Path:
+    """Write only aggregate development metrics; never player predictions."""
+    selection = select_opponent_candidate(baseline, candidates)
+    if tuple((fold.first_event, fold.last_event) for fold in baseline.folds) != DEVELOPMENT_FOLDS:
+        raise ValueError("baseline requires all three development folds")
+    if any(tuple((fold.first_event, fold.last_event) for fold in result.folds)
+           != DEVELOPMENT_FOLDS for result in candidates):
+        raise ValueError("each opponent setting requires all three development folds")
+    def aggregate(result):
+        return {
+            "folds": [asdict(fold) for fold in result.folds],
+            "pooled_points": {name: asdict(summary)
+                              for name, summary in result.pooled_points.items()},
+            "pooled_model_minutes": asdict(result.pooled_model_minutes),
+            "pooled_per_gameweek_mae": result.pooled_per_gameweek_mae,
+        }
+    payload = {
+        "report_version": "opponent-development-v1",
+        "baseline_parameters": asdict(DEFAULT_CANDIDATE),
+        "development_counts": asdict(counts),
+        "selection": asdict(selection),
+        "baseline": aggregate(baseline),
+        "candidates": [{"setting": result.setting, **aggregate(result)}
+                       for result in sorted(candidates, key=lambda item: item.setting)],
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def select_development_candidate(results: tuple[CandidateResult, ...]) -> SelectionDecision:
