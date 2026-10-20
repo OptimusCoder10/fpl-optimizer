@@ -1,0 +1,77 @@
+{
+  "archive": {
+    "loader_checksum_match": true,
+    "repository": "vaastav/Fantasy-Premier-League",
+    "season": "2025-26",
+    "sha256": {
+      "fixtures.csv": "2d7e3950d346df14ca486cb09e9b9ba406d37d943775244eed06cdc021ffb3a9",
+      "merged_gw.csv": "0d09f1f1cb1b5520ec8e2f25238aa652efe2a263d8ca7cb2b6538b27bf86727d",
+      "players_raw.csv": "412ce0172016f8f98f25177dc6de9f3cd2a8ec7a6135f9aa638d7fdee784d67b",
+      "teams.csv": "b29df099cb0ad25413e284e53116099b0e0496874f99743dbc0870d8241b46c5"
+    },
+    "source_commit": "9779cdbc0c07f6c900c2d0c181ddf6bb9c800f88"
+  },
+  "baseline_freeze_sha256": "4669732e20e7b686e4d89d4195633db46214a2b9f053e2116c05dcac1d413baa",
+  "code_commit": "fdeaeaa7a2d7dc1596c502131889086667ce1ecc",
+  "entry_point": {
+    "arguments": [
+      "/tmp/fpl-j35-reproduction-archive-2025-26",
+      "--output",
+      "~/fpl-benchmark-reports/opponent-development-report-2026-10-20-reproduction.json",
+      "--last-event",
+      "19"
+    ],
+    "module": "fpl_optimizer.development_opponent",
+    "path_notation": "~ denotes the executing user home; the actual output was written outside the repository"
+  },
+  "lost_original_report_sha256": "95ffcfbc0f7186d1d9b9e7367da267089d50ff254727d13875e2a69db0ea25fd",
+  "report_sha256": "69c2345df1932f9c66031232a2f17c9b7fce0fcc8b928cca68e93fde356e6747",
+  "reproduction": {
+    "aggregates_match_original_to_six_decimals": true,
+    "gate_cohort_and_neutral_counts_match": true,
+    "hash_difference_note": "The original bytes are unavailable for a byte diff. All checked aggregates match; the unchanged writer records measured fold runtime_seconds, its only nondeterministic report field.",
+    "original_byte_diff_available": false,
+    "reason": "Original /tmp report and sidecar were lost between tasks. Owner authorized exactly one development-only reproduction.",
+    "runs_this_task": 1
+  },
+  "run_date": "2026-10-20",
+  "versions": {
+    "dependencies": {
+      "alembic": "1.20.0",
+      "annotated-doc": "0.0.5",
+      "annotated-types": "0.8.0",
+      "anyio": "4.15.1",
+      "asyncpg": "0.31.0",
+      "certifi": "2026.7.22",
+      "click": "8.5.0",
+      "fastapi": "0.143.0",
+      "fpl-optimizer-backend": "0.1.0",
+      "greenlet": "3.5.6",
+      "h11": "0.16.0",
+      "httpcore": "1.0.9",
+      "httpx": "0.28.1",
+      "idna": "3.20",
+      "iniconfig": "2.3.0",
+      "mako": "1.4.3",
+      "markupsafe": "3.0.3",
+      "opentelemetry-api": "1.45.1",
+      "packaging": "26.3",
+      "pluggy": "1.6.0",
+      "pulp": "3.3.0",
+      "pydantic": "2.13.5",
+      "pydantic-settings": "2.15.0",
+      "pydantic_core": "2.46.5",
+      "pygments": "2.21.0",
+      "pytest": "9.1.1",
+      "pytest-asyncio": "1.4.0",
+      "python-dotenv": "1.2.3",
+      "sqlalchemy": "2.1.1",
+      "starlette": "1.8.0",
+      "typing-inspection": "0.4.4",
+      "typing_extensions": "4.16.0",
+      "uvicorn": "0.54.0"
+    },
+    "python": "3.14.7",
+    "uv": "uv 0.12.19 (x86_64-unknown-linux-gnu)"
+  }
+}
