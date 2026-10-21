@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 import pytest_asyncio
+from pydantic import SecretStr
 from sqlalchemy import select
 
 from fpl_optimizer import ingest
@@ -56,11 +57,16 @@ async def ingestion(migrated_test_engine, publication_settings, monkeypatch):
             return httpx.Response(200, json=fixtures)
         return httpx.Response(200, json=history(int(path.split("/")[-2])))
     async def run(*, budget=660, factory_override=None, transport_handler=handler,
-                  history_budget=600, archive_storage=None, archive_allowance="10000000"):
+                  history_budget=600, archive_storage=None, archive_allowance="10000000",
+                  archive_settings=None):
         async with client_for(transport_handler, clock, budget_seconds=budget) as client:
-            effective_settings = (publication_settings.model_copy(
-                update={"fpl_storage_allowance_bytes": archive_allowance})
-                if archive_storage is not None else publication_settings)
+            # Synthetic ingestion never inherits a developer's live storage settings.
+            storage_values = dict(fpl_storage_url=None, fpl_storage_key=None,
+                                  fpl_storage_bucket=None, fpl_storage_allowance_bytes=None)
+            if archive_storage is not None:
+                storage_values["fpl_storage_allowance_bytes"] = archive_allowance
+            storage_values.update(archive_settings or {})
+            effective_settings = publication_settings.model_copy(update=storage_values)
             return await run_ingestion(factory_override or factory, client, season_id=season,
                                        rules_version="synthetic-v1", settings=effective_settings,
                                        history_budget=timedelta(seconds=history_budget),
@@ -243,6 +249,90 @@ async def test_archive_warns_at_80_percent_allowance(ingestion, caplog):
     outcome = await archive_shared_publication(blocked, **archive_inputs(bootstrap, fixtures, clock.now()))
     assert outcome.status == "missed" and outcome.category == "capacity"
     assert blocked.deleted == [] and blocked.uploads == []
+
+
+async def test_ingestion_unchanged_when_archive_not_configured(
+    ingestion, monkeypatch, publication_settings,
+):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    def forbidden_storage(*args, **kwargs):
+        pytest.fail("storage network adapter must not be constructed")
+    monkeypatch.setattr(ingest, "SupabaseStorage", forbidden_storage)
+    result = await run()
+    assert result.status == "success" and result.shared_published
+    assert result.archive.status == "missed" and result.archive.category == "not_configured"
+    assert len((await stored(factory, season))[1]) == len(fixtures)
+    shared_before = await state(factory, season)
+    history_before = await state(factory, season, "history/player/1")
+    clock.advance(1800)
+    calls.clear()
+    repeated = await run()
+    assert not repeated.shared_published and calls == []
+    assert (await state(factory, season)).last_success_at == shared_before.last_success_at
+    assert (await state(factory, season, "history/player/1")).last_success_at == history_before.last_success_at
+    # Exercise the real CLI exit mapping with this separate archive-miss result.
+    settings = publication_settings.model_copy(update={
+        "fpl_season_id": season, "fpl_rules_version": "synthetic-v1",
+        "fpl_storage_url": None, "fpl_storage_key": None,
+        "fpl_storage_bucket": None, "fpl_storage_allowance_bytes": None,
+    })
+    class CliEngine:
+        async def dispose(self):
+            pass
+    class CliClient:
+        def __init__(self, *, budget_seconds):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+    async def completed_run(*args, **kwargs):
+        return result
+    monkeypatch.setattr(ingest, "Settings", lambda: settings)
+    monkeypatch.setattr(ingest, "create_database_engine", lambda value: CliEngine())
+    monkeypatch.setattr(ingest, "create_session_factory", lambda engine: "unused")
+    monkeypatch.setattr(ingest, "FPLClient", CliClient)
+    monkeypatch.setattr(ingest, "run_ingestion", completed_run)
+    assert await ingest._main() == 0
+
+
+async def test_archive_never_logs_storage_url_or_key_even_on_error(
+    ingestion, caplog, capsys,
+):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    secret_url = "https://secret-storage.example.invalid"
+    secret_key = "storage-key-sentinel-keep-private"
+    class UnsafeUpload(FakeArchiveStorage):
+        async def upload(self, key, content, content_type):
+            raise RuntimeError(f"upload failed at {secret_url} with {secret_key}")
+    with caplog.at_level(logging.INFO, logger="fpl_optimizer"):
+        result = await run(
+            archive_storage=UnsafeUpload(),
+            archive_settings=dict(fpl_storage_url=secret_url,
+                                  fpl_storage_key=SecretStr(secret_key),
+                                  fpl_storage_bucket="private-archive"),
+        )
+    captured = capsys.readouterr()
+    record = repr(result.archive)
+    assert result.shared_published and result.status == "success"
+    for output in (caplog.text, captured.out, captured.err, record):
+        assert secret_url not in output and secret_key not in output
+    assert result.archive.status == "missed" and result.archive.category == "archive_internal"
+
+
+async def test_partial_storage_config_is_reported_not_crashed(ingestion, monkeypatch, caplog):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    def forbidden_storage(*args, **kwargs):
+        pytest.fail("partial storage config must stop before constructing a client")
+    monkeypatch.setattr(ingest, "SupabaseStorage", forbidden_storage)
+    with caplog.at_level(logging.WARNING, logger="fpl_optimizer"):
+        result = await run(archive_settings={
+            "fpl_storage_url": "https://configured-storage.example.invalid",
+        })
+    assert result.shared_published and result.status == "success"
+    assert result.archive.status == "missed" and result.archive.category == "not_configured"
+    assert "captured=0 missed=1 category=not_configured" in caplog.text
+    assert (await state(factory, season)).last_success_at is not None
 
 
 async def test_failed_validation_preserves_last_good_publication_and_success_time(ingestion, caplog):

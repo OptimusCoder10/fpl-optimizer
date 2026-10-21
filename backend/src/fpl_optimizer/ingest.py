@@ -98,9 +98,9 @@ async def run_ingestion(
                     "budget_exhausted" if client.exhausted else "failed", category=category,
                 )
             try:
-                published_at = client.clock()
                 async with session_factory.begin() as session:
                     await require_same_database(connection, await session.connection())
+                    published_at = client.clock()
                     await _write_shared_catalog(session, envelope, SharedPublication(
                         season_id=season_id, rules_version=rules_version,
                         source_observed_at=observed_at, published_at=published_at,

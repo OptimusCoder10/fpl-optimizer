@@ -54,8 +54,8 @@ jobs:
           DATABASE_SSL_CA_FILE: ${{ runner.temp }}/fpl-database-ca.pem
           FPL_SEASON_ID: ${{ vars.FPL_SEASON_ID }}
           FPL_RULES_VERSION: ${{ vars.FPL_RULES_VERSION }}
-          FPL_STORAGE_URL: ${{ vars.FPL_STORAGE_URL }}
+          FPL_STORAGE_URL: ${{ secrets.FPL_STORAGE_URL }}
           FPL_STORAGE_KEY: ${{ secrets.FPL_STORAGE_KEY }}
-          FPL_STORAGE_BUCKET: ${{ vars.FPL_STORAGE_BUCKET }}
+          FPL_STORAGE_BUCKET: ${{ secrets.FPL_STORAGE_BUCKET }}
           FPL_STORAGE_ALLOWANCE_BYTES: ${{ vars.FPL_STORAGE_ALLOWANCE_BYTES }}
         run: .venv/bin/python -m fpl_optimizer.ingest

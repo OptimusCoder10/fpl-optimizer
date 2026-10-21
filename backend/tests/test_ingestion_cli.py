@@ -6,6 +6,7 @@ import pytest
 
 from fpl_optimizer import ingest
 from fpl_optimizer.config import Settings
+from fpl_optimizer.services.shared_archive import ArchiveResult
 
 
 @pytest.mark.parametrize("status,expected", [
@@ -38,7 +39,8 @@ async def test_cli_exit_codes_and_environment_wiring(monkeypatch, status, expect
         assert kwargs["season_id"] == "2026-27"
         assert kwargs["rules_version"] == "synthetic-v1"
         assert kwargs["history_budget"].total_seconds() == 30
-        return ingest.IngestionResult(status)
+        archive = ArchiveResult("missed", "not_configured") if status == "success" else None
+        return ingest.IngestionResult(status, archive=archive)
     monkeypatch.setattr(ingest, "run_ingestion", run)
     assert await ingest._main() == expected
     assert disposed == [True]
