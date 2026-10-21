@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, literal, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -55,6 +55,29 @@ class PlayerEventTotal:
         return not self.mismatched_fixture_ids
 
 
+@dataclass(frozen=True)
+class _CatalogSnapshot:
+    """Shared identities captured under the ingestion lock for one run."""
+
+    season: Season
+    players: dict[int, Player]
+    shared_metadata: CacheMetadata
+    fixtures: dict[int, Fixture]
+
+
+async def _load_catalog_snapshot(session: AsyncSession, season_id: str) -> _CatalogSnapshot:
+    season = await session.get(Season, season_id)
+    shared = await session.get(CacheMetadata, (season_id, SHARED_METADATA_KEY))
+    if season is None or shared is None:
+        raise ValueError("history requires a published shared catalog")
+    players = (await session.scalars(select(Player).where(Player.season_id == season_id))).all()
+    fixtures = (await session.scalars(select(Fixture).where(Fixture.season_id == season_id))).all()
+    return _CatalogSnapshot(
+        season, {player.id: player for player in players}, shared,
+        {fixture.id: fixture for fixture in fixtures},
+    )
+
+
 def player_history_metadata_key(player_id: int) -> str:
     return f"{PLAYER_HISTORY_KEY_PREFIX}{player_id}"
 
@@ -87,18 +110,22 @@ async def _validate_catalog_dependencies(
     session: AsyncSession,
     envelope: ElementSummaryEnvelope,
     publication: PlayerHistoryPublication,
+    *,
+    catalog: _CatalogSnapshot | None = None,
+    existing_fixture_ids: set[int] | None = None,
 ) -> tuple[Season, Player, CacheMetadata, dict[int, Fixture]]:
-    season = await session.get(Season, publication.season_id)
+    season = (catalog.season if catalog is not None
+              else await session.get(Season, publication.season_id))
     if season is None:
         raise ValueError("history season is absent from the shared catalog")
 
-    player = await session.get(Player, (publication.season_id, publication.player_id))
+    player = (catalog.players.get(publication.player_id) if catalog is not None
+              else await session.get(Player, (publication.season_id, publication.player_id)))
     if player is None:
         raise ValueError("history player is absent from the shared catalog")
 
-    shared_metadata = await session.get(
-        CacheMetadata, (publication.season_id, SHARED_METADATA_KEY)
-    )
+    shared_metadata = (catalog.shared_metadata if catalog is not None else
+                       await session.get(CacheMetadata, (publication.season_id, SHARED_METADATA_KEY)))
     if shared_metadata is None:
         raise ValueError("history requires a published shared catalog")
 
@@ -114,17 +141,19 @@ async def _validate_catalog_dependencies(
     fixture_ids = {row.fixture for row in envelope.history}
     fixtures: dict[int, Fixture] = {}
     if fixture_ids:
-        fixtures = {
-            fixture.id: fixture
-            for fixture in (
-                await session.scalars(
+        if catalog is not None:
+            fixtures = {fixture_id: catalog.fixtures[fixture_id]
+                        for fixture_id in fixture_ids if fixture_id in catalog.fixtures}
+        else:
+            fixtures = {
+                fixture.id: fixture
+                for fixture in (await session.scalars(
                     select(Fixture).where(
                         Fixture.season_id == publication.season_id,
                         Fixture.id.in_(fixture_ids),
                     )
-                )
-            ).all()
-        }
+                )).all()
+            }
     missing_fixture_ids = sorted(fixture_ids - fixtures.keys())
     if missing_fixture_ids:
         raise ValueError(
@@ -163,16 +192,13 @@ async def _validate_catalog_dependencies(
                 f"{reconstructed_points}"
             )
 
-    existing_fixture_ids = set(
-        (
-            await session.scalars(
-                select(PlayerFixtureHistory.fixture_id).where(
-                    PlayerFixtureHistory.season_id == publication.season_id,
-                    PlayerFixtureHistory.player_id == publication.player_id,
-                )
+    if existing_fixture_ids is None:
+        existing_fixture_ids = set((await session.scalars(
+            select(PlayerFixtureHistory.fixture_id).where(
+                PlayerFixtureHistory.season_id == publication.season_id,
+                PlayerFixtureHistory.player_id == publication.player_id,
             )
-        ).all()
-    )
+        )).all())
     disappeared_fixture_ids = sorted(existing_fixture_ids - fixture_ids)
     if disappeared_fixture_ids:
         raise ValueError(
@@ -266,47 +292,58 @@ async def _write_player_history(
     session: AsyncSession,
     envelope: ElementSummaryEnvelope,
     publication: PlayerHistoryPublication,
+    *,
+    catalog: _CatalogSnapshot | None = None,
+    history_due_at: datetime | None = None,
 ) -> int:
     """Validate against the catalog, then write rows and metadata together."""
-    season, player, shared_metadata, fixtures = await _validate_catalog_dependencies(
-        session, envelope, publication
-    )
     checkpoint_key = player_history_metadata_key(publication.player_id)
-    existing_checkpoint = await session.get(
-        CacheMetadata, (publication.season_id, checkpoint_key)
-    )
-    history_metadata = await session.get(
-        CacheMetadata, (publication.season_id, HISTORY_METADATA_KEY)
+    checkpoint_version = select(CacheMetadata.publication_version).where(
+        CacheMetadata.season_id == publication.season_id,
+        CacheMetadata.key == checkpoint_key,
+    ).scalar_subquery()
+    checkpoint_source = select(CacheMetadata.source_observed_at).where(
+        CacheMetadata.season_id == publication.season_id,
+        CacheMetadata.key == checkpoint_key,
+    ).scalar_subquery()
+    history_version = select(CacheMetadata.publication_version).where(
+        CacheMetadata.season_id == publication.season_id,
+        CacheMetadata.key == HISTORY_METADATA_KEY,
+    ).scalar_subquery()
+    shared_version = select(CacheMetadata.publication_version).where(
+        CacheMetadata.season_id == publication.season_id,
+        CacheMetadata.key == SHARED_METADATA_KEY,
+    ).scalar_subquery()
+    previous_fixtures = select(func.array_agg(PlayerFixtureHistory.fixture_id)).where(
+        PlayerFixtureHistory.season_id == publication.season_id,
+        PlayerFixtureHistory.player_id == publication.player_id,
+    ).scalar_subquery()
+    current_shared, prior_version, prior_source, summary_version, prior_fixtures = (
+        await session.execute(select(
+            shared_version, checkpoint_version, checkpoint_source,
+            history_version, previous_fixtures,
+        ))
+    ).one()
+    if catalog is not None and current_shared != catalog.shared_metadata.publication_version:
+        catalog = await _load_catalog_snapshot(session, publication.season_id)
+    season, player, shared_metadata, fixtures = await _validate_catalog_dependencies(
+        session, envelope, publication, catalog=catalog,
+        existing_fixture_ids=set(prior_fixtures or ()),
     )
     is_replay = (
-        existing_checkpoint is not None
-        and existing_checkpoint.source_observed_at == publication.source_observed_at
+        prior_version is not None
+        and prior_source == publication.source_observed_at
     )
     publication_version = (
-        existing_checkpoint.publication_version
+        prior_version
         if is_replay
-        else (history_metadata.publication_version + 1 if history_metadata else 1)
+        else (summary_version + 1 if summary_version is not None else 1)
     )
 
     rows = _history_rows(
         envelope, publication, player, fixtures, publication_version
     )
     await _write_history_rows(session, rows)
-
-    if not is_replay:
-        history_statement = insert(CacheMetadata).values(
-            season_id=publication.season_id,
-            key=HISTORY_METADATA_KEY,
-            publication_version=publication_version,
-            last_success_at=None,
-            source_observed_at=None,
-        )
-        await session.execute(
-            history_statement.on_conflict_do_update(
-                index_elements=("season_id", "key"),
-                set_={"publication_version": publication_version},
-            )
-        )
 
     fixture_dependencies = [
         {
@@ -353,7 +390,31 @@ async def _write_player_history(
         "retry_count": 0,
         "next_retry_at": None,
     }
-    checkpoint_statement = insert(CacheMetadata).values(**checkpoint_values)
+    if history_due_at is not None:
+        checkpoint_values["history_due_at"] = history_due_at
+    if is_replay:
+        checkpoint_statement = insert(CacheMetadata).values(**checkpoint_values)
+    else:
+        history_statement = insert(CacheMetadata).values(
+            season_id=publication.season_id,
+            key=HISTORY_METADATA_KEY,
+            publication_version=publication_version,
+            last_success_at=None,
+            source_observed_at=None,
+        )
+        history_bump = history_statement.on_conflict_do_update(
+            index_elements=("season_id", "key"),
+            set_={"publication_version": publication_version},
+        ).returning(CacheMetadata.publication_version).cte("history_bump")
+        columns = CacheMetadata.__table__.c
+        checkpoint_statement = insert(CacheMetadata).from_select(
+            list(checkpoint_values),
+            select(*(
+                history_bump.c.publication_version if name == "publication_version"
+                else literal(value, type_=columns[name].type)
+                for name, value in checkpoint_values.items()
+            )).select_from(history_bump),
+        )
     await session.execute(
         checkpoint_statement.on_conflict_do_update(
             index_elements=("season_id", "key"),

@@ -11,7 +11,7 @@ from sqlalchemy import delete, event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fpl_optimizer.db.advisory_lock import ingestion_lock
-from fpl_optimizer.db.models import CacheMetadata, Player
+from fpl_optimizer.db.models import CacheMetadata, Fixture, Player
 from fpl_optimizer.db.session import create_session_factory
 from fpl_optimizer.schemas.fixtures import SharedCatalogEnvelope
 from fpl_optimizer.services import history_population, player_history
@@ -224,8 +224,169 @@ async def test_history_statement_counts_exact_for_known_player(
     line = next(record.message for record in caplog.records
                 if record.message.startswith("History population:"))
     assert (result.succeeded, result.pending) == (1, 1)
-    assert "stmts_commit_avg=15.000 stmts_commit_max=15" in line
+    assert "stmts_commit_avg=3.000 stmts_commit_max=3" in line
     assert "stmts_other_avg=15.000" in line
+
+
+async def _measured_player_run(population, publication_settings, monkeypatch):
+    factory, season, clock, _, _ = population
+    captured = []
+    original = history_population._StatementCounts
+
+    class CapturedCounts(original):
+        def __init__(self, *args):
+            super().__init__(*args)
+            captured.append(self)
+
+    monkeypatch.setattr(history_population, "_StatementCounts", CapturedCounts)
+    result = await history_population.populate_history(
+        factory, season, FakeFetcher(), clock=clock.now,
+        budget=timedelta(minutes=10), elapsed_clock=clock.monotonic,
+        settings=publication_settings, db_diagnostics=True,
+    )
+    assert result.succeeded == 2
+    return captured[0]
+
+
+async def test_player_publish_uses_at_most_four_commit_statements(
+    population, publication_settings, monkeypatch,
+):
+    counts = await _measured_player_run(population, publication_settings, monkeypatch)
+    assert counts.player_commits == [3, 3]
+
+
+async def test_player_publish_uses_at_most_one_statement_outside_commit(
+    population, publication_settings, monkeypatch,
+):
+    counts = await _measured_player_run(population, publication_settings, monkeypatch)
+    assert counts.player_others == [1, 1]
+
+
+async def test_batched_publish_commits_rows_checkpoint_and_version_together(
+    population, monkeypatch,
+):
+    factory, season, clock, _, run = population
+    original_commit = AsyncSession.commit
+    observed_before = []
+
+    async def inspect_before_commit(session):
+        async with factory() as reader:
+            rows = (await reader.scalars(select(player_history.PlayerFixtureHistory).where(
+                player_history.PlayerFixtureHistory.season_id == season,
+            ))).all()
+            summary = await reader.get(CacheMetadata, (season, "history"))
+            published = (await reader.scalars(select(CacheMetadata).where(
+                CacheMetadata.season_id == season,
+                CacheMetadata.key.startswith("history/player/"),
+                CacheMetadata.last_success_at.is_not(None),
+            ))).all()
+            observed_before.append((len(rows), summary.publication_version if summary else None,
+                                    len(published)))
+        await original_commit(session)
+
+    monkeypatch.setattr(AsyncSession, "commit", inspect_before_commit)
+    result = await run()
+    assert result.succeeded == 2
+    assert observed_before == [(0, None, 0), (1, 1, 1)]
+    async with factory() as reader:
+        rows = (await reader.scalars(select(player_history.PlayerFixtureHistory).where(
+            player_history.PlayerFixtureHistory.season_id == season,
+        ))).all()
+        summary = await reader.get(CacheMetadata, (season, "history"))
+        states = (await reader.scalars(select(CacheMetadata).where(
+            CacheMetadata.season_id == season,
+            CacheMetadata.key.startswith("history/player/"),
+        ))).all()
+    assert len(rows) == 2
+    assert summary.publication_version == 2
+    assert sorted(state.publication_version for state in states) == [1, 2]
+    assert all(state.last_success_at == clock.now() for state in states)
+
+
+async def test_failure_midway_rolls_back_rows_checkpoint_and_version(
+    population, monkeypatch,
+):
+    factory, season, _, _, run = population
+    original = player_history._write_player_history
+
+    async def fail_after_all_writes(*args, **kwargs):
+        await original(*args, **kwargs)
+        raise RuntimeError("injected after row and metadata writes")
+
+    monkeypatch.setattr(player_history, "_write_player_history", fail_after_all_writes)
+    result = await run()
+    assert (result.succeeded, result.failed) == (0, 2)
+    async with factory() as session:
+        assert (await session.scalars(select(player_history.PlayerFixtureHistory).where(
+            player_history.PlayerFixtureHistory.season_id == season,
+        ))).all() == []
+        assert await session.get(CacheMetadata, (season, "history")) is None
+        states = (await session.scalars(select(CacheMetadata).where(
+            CacheMetadata.season_id == season,
+            CacheMetadata.key.startswith("history/player/"),
+        ))).all()
+    assert len(states) == 2
+    assert all(state.last_success_at is None and state.publication_version == 1
+               and state.history_due_at is not None for state in states)
+
+
+async def test_failed_envelope_preserves_previous_rows_and_success_time(population):
+    factory, season, clock, _, run = population
+    await run()
+    async with factory() as session:
+        prior = await player_history.read_player_history(session, season, 1)
+        prior_due = prior.checkpoint.history_due_at
+    clock.advance(timedelta(days=1))
+
+    async def invalid_fetch(player_id):
+        payload = load_json_fixture("element_summary_5.json")
+        payload["history"][0]["element"] = player_id
+        if player_id == 1:
+            payload["history"][0]["round"] = 99
+        return payload
+
+    result = await run(fetch=invalid_fetch)
+    assert (result.succeeded, result.failed) == (1, 1)
+    async with factory() as session:
+        current = await player_history.read_player_history(session, season, 1)
+    assert current.checkpoint.last_success_at == prior.checkpoint.last_success_at
+    assert current.checkpoint.source_observed_at == prior.checkpoint.source_observed_at
+    assert current.checkpoint.publication_version == prior.checkpoint.publication_version
+    assert current.checkpoint.history_due_at == prior_due
+    assert [(row.fixture_id, row.total_points, row.publication_version)
+            for row in current.rows] == [
+                (row.fixture_id, row.total_points, row.publication_version)
+                for row in prior.rows
+            ]
+
+
+async def test_catalog_snapshot_reloads_on_shared_version_change(
+    population, publication_settings,
+):
+    factory, season, clock, _, _ = population
+
+    async def fetch(player_id):
+        if player_id == 5:
+            async with factory.begin() as session:
+                await session.execute(update(Fixture).where(
+                    Fixture.season_id == season, Fixture.id == 1,
+                ).values(kickoff_time=datetime(2026, 8, 21, 20, tzinfo=timezone.utc)))
+                await session.execute(update(CacheMetadata).where(
+                    CacheMetadata.season_id == season, CacheMetadata.key == "shared",
+                ).values(publication_version=2))
+        payload = load_json_fixture("element_summary_5.json")
+        payload["history"][0]["element"] = player_id
+        return payload
+
+    result = await history_population.populate_history(
+        factory, season, fetch, clock=clock.now,
+        budget=timedelta(minutes=10), elapsed_clock=clock.monotonic,
+        settings=publication_settings,
+    )
+    assert (result.succeeded, result.failed) == (1, 1)
+    async with factory() as session:
+        assert await player_history.read_player_history(session, season, 1) is not None
+        assert await player_history.read_player_history(session, season, 5) is None
 
 
 async def test_history_db_ping_uses_injected_clock(

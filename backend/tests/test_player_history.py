@@ -1,14 +1,16 @@
 """Single-player element-summary publication and reconciliation tests."""
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
+import subprocess
+from types import ModuleType
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import func, inspect, select
+from sqlalchemy import func, inspect, select, update
 
 from fpl_optimizer.db.models import CacheMetadata, PlayerFixtureHistory
 from fpl_optimizer.db.session import create_session_factory
@@ -27,6 +29,18 @@ from fpl_optimizer.services.player_history import (
     read_player_history,
 )
 from fpl_optimizer.services.shared_catalog import publish_shared_catalog
+
+
+def _previous_player_history_module() -> ModuleType:
+    """Execute the exact publisher source at the pre-optimization commit."""
+    source = subprocess.run(
+        ["git", "show", "eea8aa9:backend/src/fpl_optimizer/services/player_history.py"],
+        capture_output=True, text=True, check=True,
+        cwd=Path(__file__).resolve().parents[2],
+    ).stdout
+    module = ModuleType("previous_player_history")
+    exec(compile(source, "eea8aa9/player_history.py", "exec"), module.__dict__)
+    return module
 
 
 pytestmark = pytest.mark.database
@@ -135,6 +149,57 @@ async def publish_catalog(
         settings=publication_settings,
     )
     return session_factory
+
+
+async def test_batched_publish_gives_identical_database_state_to_previous_implementation(
+    migrated_test_engine, publication_settings,
+):
+    previous = _previous_player_history_module()
+    old_season, new_season = "2900-01", "2901-02"
+    factory = await publish_catalog(migrated_test_engine, publication_settings,
+                                    old_season, double_gameweek=True)
+    await publish_catalog(migrated_test_engine, publication_settings,
+                          new_season, double_gameweek=True)
+
+    async def state(season_id):
+        async with factory() as session:
+            history = (await session.execute(select(PlayerFixtureHistory.__table__).where(
+                PlayerFixtureHistory.season_id == season_id,
+            ))).mappings().all()
+            metadata = (await session.execute(select(CacheMetadata.__table__).where(
+                CacheMetadata.season_id == season_id,
+            ))).mappings().all()
+        def normalized(rows, key):
+            return sorted(({**dict(row), "season_id": "same"} for row in rows),
+                          key=lambda row: row[key])
+        return (normalized(history, "fixture_id"), normalized(metadata, "key"))
+
+    changed = history_envelope(double_gameweek=True)
+    changed.history[0].minutes = 90
+    changed.history[0].clean_sheets = 1
+    changed.history[0].starts = 1
+    changed.history[0].total_points = 6
+    for envelope, hour in (
+        (history_envelope(double_gameweek=True), 11),
+        (history_envelope(double_gameweek=True), 11),
+        (changed, 12),
+    ):
+        for season_id, write in (
+            (old_season, previous._write_player_history),
+            (new_season, player_history_service._write_player_history),
+        ):
+            publication = history_publication(season_id, observed_hour=hour)
+            due = publication.published_at + timedelta(days=1)
+            async with factory.begin() as session:
+                if season_id == old_season:
+                    await write(session, envelope, publication)
+                    await session.execute(update(CacheMetadata).where(
+                        CacheMetadata.season_id == season_id,
+                        CacheMetadata.key == player_history_metadata_key(5),
+                    ).values(history_due_at=due, last_attempt_at=publication.published_at))
+                else:
+                    await write(session, envelope, publication, history_due_at=due)
+        assert await state(old_season) == await state(new_season)
 
 
 def test_saved_element_summary_parses_numeric_strings_and_zero_minutes() -> None:

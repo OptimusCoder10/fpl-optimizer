@@ -48,10 +48,11 @@ class _StatementCounts:
         self.other = 0
         self.commit = 0
         self.player_commits: list[int] = []
+        self.player_others: list[int] = []
 
     def _count(self, _connection, _cursor, _statement, _parameters, _context,
                _executemany):
-        if self.phase == "other":
+        if self.phase in {"other", "player_other"}:
             self.other += 1
         elif self.phase == "commit":
             self.commit += 1
@@ -216,6 +217,7 @@ async def _populate_history_body(
     async with session_factory.begin() as session:
         await require_same_database(lock_connection, await session.connection())
         await _discover_required_players(session, season_id, now)
+        catalog = await player_history._load_catalog_snapshot(session, season_id)
 
     async with session_factory() as session:
         due = func.greatest(
@@ -239,8 +241,10 @@ async def _populate_history_body(
         player_id = _player_id(checkpoint)
         attempted += 1
         attempted_at = _utc(clock())
+        if counts is not None:
+            counts.phase = "player_other"
+            other_statements_before = counts.other
         async with session_factory.begin() as session:
-            await require_same_database(lock_connection, await session.connection())
             await session.execute(
                 update(CacheMetadata)
                 .where(
@@ -249,6 +253,9 @@ async def _populate_history_body(
                 )
                 .values(last_attempt_at=attempted_at)
             )
+        if counts is not None:
+            counts.player_others.append(counts.other - other_statements_before)
+            counts.phase = "other"
 
         category = "fetch"
         stop_run = False
@@ -295,24 +302,10 @@ async def _populate_history_body(
                 counts.phase = "commit"
                 commit_statements_before = counts.commit
             async with session_factory() as session:
-                # Configuration/lock errors stop the run, not player retries.
-                await require_same_database(
-                    lock_connection, await session.connection(),
-                )
                 try:
                     await player_history._write_player_history(
-                        session, envelope, publication,
-                    )
-                    await session.execute(
-                        update(CacheMetadata)
-                        .where(
-                            CacheMetadata.season_id == season_id,
-                            CacheMetadata.key == checkpoint.key,
-                        )
-                        .values(
-                            history_due_at=publication.published_at + REFRESH_INTERVAL,
-                            last_attempt_at=attempted_at,
-                        )
+                        session, envelope, publication, catalog=catalog,
+                        history_due_at=publication.published_at + REFRESH_INTERVAL,
                     )
                     await session.commit()
                 except Exception as error:
@@ -341,7 +334,6 @@ async def _populate_history_body(
         # Separate short transaction after rollback; never overwrite success,
         # source time, coverage, rows, or publication versions on failure.
         async with session_factory.begin() as session:
-            await require_same_database(lock_connection, await session.connection())
             state = await session.get(CacheMetadata, (season_id, checkpoint.key))
             state.retry_count = (state.retry_count or 0) + 1
             delay = min(
