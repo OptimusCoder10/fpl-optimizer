@@ -1,0 +1,27 @@
+{
+  "archive_sha256": {
+    "fixtures.csv": "2d7e3950d346df14ca486cb09e9b9ba406d37d943775244eed06cdc021ffb3a9",
+    "merged_gw.csv": "0d09f1f1cb1b5520ec8e2f25238aa652efe2a263d8ca7cb2b6538b27bf86727d",
+    "players_raw.csv": "412ce0172016f8f98f25177dc6de9f3cd2a8ec7a6135f9aa638d7fdee784d67b",
+    "teams.csv": "b29df099cb0ad25413e284e53116099b0e0496874f99743dbc0870d8241b46c5"
+  },
+  "baseline_freeze_sha256": "4669732e20e7b686e4d89d4195633db46214a2b9f053e2116c05dcac1d413baa",
+  "freeze_commit": "95ca24f86bae759bb456c64352cb25e122aea0c0",
+  "head": "702386b95a78e69c3899711d96ce9b19c380bf12",
+  "opponent_freeze_sha256": "b6049ea18d1ef87cc737b1befeb1fc2c0adfd61d6710a50d0fcf6ec373015439",
+  "timestamp_utc": "2026-10-20T23:00:41.071163+00:00",
+  "versions": {
+    "baseline": {
+      "model": "empirical-fixture-v1",
+      "report": "development-fold-v1",
+      "rules": "fpl-2025-v1",
+      "scoring_adapter": "fpl-defensive-contribution-v1"
+    },
+    "opponent": {
+      "model": "empirical-fixture-v1",
+      "report": "opponent-development-v1",
+      "rules": "fpl-2025-v1",
+      "scoring_adapter": "fpl-defensive-contribution-v1"
+    }
+  }
+}

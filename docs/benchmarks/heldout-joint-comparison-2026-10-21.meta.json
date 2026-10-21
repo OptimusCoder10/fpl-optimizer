@@ -1,0 +1,46 @@
+{
+  "archive_identity": {
+    "commit": "9779cdbc0c07f6c900c2d0c181ddf6bb9c800f88",
+    "season": "2025-26",
+    "sha256": {
+      "fixtures.csv": "2d7e3950d346df14ca486cb09e9b9ba406d37d943775244eed06cdc021ffb3a9",
+      "merged_gw.csv": "0d09f1f1cb1b5520ec8e2f25238aa652efe2a263d8ca7cb2b6538b27bf86727d",
+      "players_raw.csv": "412ce0172016f8f98f25177dc6de9f3cd2a8ec7a6135f9aa638d7fdee784d67b",
+      "teams.csv": "b29df099cb0ad25413e284e53116099b0e0496874f99743dbc0870d8241b46c5"
+    },
+    "source": "vaastav/Fantasy-Premier-League"
+  },
+  "authorisation_phrase_used": "I authorise the one-time GW20-38 comparison",
+  "code_commit": "702386b95a78e69c3899711d96ce9b19c380bf12",
+  "freeze_commit": "95ca24f86bae759bb456c64352cb25e122aea0c0",
+  "freeze_file_sha256": {
+    "baseline": "4669732e20e7b686e4d89d4195633db46214a2b9f053e2116c05dcac1d413baa",
+    "opponent": "b6049ea18d1ef87cc737b1befeb1fc2c0adfd61d6710a50d0fcf6ec373015439"
+  },
+  "one_time_run": "Single owner-authorized run; no rerun.",
+  "report_sha256": "f305147d1fe87ae8e6008221c31a9d700489689612f5a8514250b0c74e30900e",
+  "run_date_ist": "2026-10-21",
+  "run_timestamp_utc": "2026-10-20T23:00:41.071163+00:00",
+  "sanitized_lock_sha256": "2f9a9c567e0aea3c002ccc3ee92b902aedcd2992a34d7f2cbc1f2f0120150e25",
+  "source_lock_sha256": "4f93004292326236d3452a767c25c4fe4900330803b8a81fafaaed1773df7c17",
+  "versions": {
+    "freeze_reports": {
+      "baseline": {
+        "model": "empirical-fixture-v1",
+        "report": "development-fold-v1",
+        "rules": "fpl-2025-v1",
+        "scoring_adapter": "fpl-defensive-contribution-v1"
+      },
+      "opponent": {
+        "model": "empirical-fixture-v1",
+        "report": "opponent-development-v1",
+        "rules": "fpl-2025-v1",
+        "scoring_adapter": "fpl-defensive-contribution-v1"
+      }
+    },
+    "heldout_report": "heldout-joint-v1",
+    "model": "empirical-fixture-v1",
+    "rules": "fpl-2025-v1",
+    "scoring_adapter": "fpl-defensive-contribution-v1"
+  }
+}
