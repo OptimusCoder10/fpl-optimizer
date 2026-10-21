@@ -1,10 +1,12 @@
 """Post-publication archive of public shared HTTP responses only."""
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
 import json
+import logging
 import re
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -16,6 +18,18 @@ from fpl_optimizer.config import Settings
 ARCHIVE_SCHEMA_VERSION = "raw-shared-snapshot-v1"
 SOURCE_ENDPOINTS = ("/api/bootstrap-static/", "/api/fixtures/")
 INTRADAY_RETENTION = timedelta(days=30)
+_storage_request_active = ContextVar("storage_request_active", default=False)
+
+
+class _SuppressStorageTransportLogs(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _storage_request_active.get()
+
+
+_storage_log_filter = _SuppressStorageTransportLogs()
+for _logger_name in ("httpx", "httpcore.connection", "httpcore.http11",
+                     "httpcore.http2", "httpcore.proxy", "httpcore.socks"):
+    logging.getLogger(_logger_name).addFilter(_storage_log_filter)
 
 
 class ArchiveError(Exception):
@@ -146,15 +160,18 @@ class SupabaseStorage:
         self._key = settings.fpl_storage_key.get_secret_value()
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        token = _storage_request_active.set(True)
         try:
             async with httpx.AsyncClient(
                 base_url=self._url, trust_env=False, follow_redirects=False,
                 timeout=httpx.Timeout(20.0),
-                headers={"Authorization": f"Bearer {self._key}", "apikey": self._key},
+                headers={"apikey": self._key},
             ) as client:
                 response = await client.request(method, path, **kwargs)
         except (httpx.HTTPError, TimeoutError):
             raise ArchiveError("transport") from None
+        finally:
+            _storage_request_active.reset(token)
         if response.status_code >= 300:
             if response.status_code == 409:
                 raise ArchiveError("duplicate_key")
