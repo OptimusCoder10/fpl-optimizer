@@ -1,7 +1,11 @@
 """Command integration with real disposable PostgreSQL and fake HTTP only."""
 
 from datetime import timedelta
+from datetime import datetime
+import gzip
+import hashlib
 from itertools import count
+import json
 import logging
 from unittest.mock import AsyncMock
 
@@ -20,6 +24,9 @@ from fpl_optimizer.ingest import run_ingestion
 from fpl_optimizer.schemas.fixtures import SEASON_CLUB_COUNTS
 from fpl_optimizer.services.player_history import read_player_history
 from fpl_optimizer.services.shared_catalog import read_target_gameweek_context
+from fpl_optimizer.services.shared_archive import (
+    ArchiveError, StoredObject, archive_shared_publication, expired_intraday_keys,
+)
 from synthetic_fpl import Clock, full_season, history, SEASON
 from test_fpl_http import client_for
 
@@ -48,11 +55,16 @@ async def ingestion(migrated_test_engine, publication_settings, monkeypatch):
         if path == "/api/fixtures/":
             return httpx.Response(200, json=fixtures)
         return httpx.Response(200, json=history(int(path.split("/")[-2])))
-    async def run(*, budget=660, factory_override=None, transport_handler=handler, history_budget=600):
+    async def run(*, budget=660, factory_override=None, transport_handler=handler,
+                  history_budget=600, archive_storage=None, archive_allowance="10000000"):
         async with client_for(transport_handler, clock, budget_seconds=budget) as client:
+            effective_settings = (publication_settings.model_copy(
+                update={"fpl_storage_allowance_bytes": archive_allowance})
+                if archive_storage is not None else publication_settings)
             return await run_ingestion(factory_override or factory, client, season_id=season,
-                                       rules_version="synthetic-v1", settings=publication_settings,
-                                       history_budget=timedelta(seconds=history_budget))
+                                       rules_version="synthetic-v1", settings=effective_settings,
+                                       history_budget=timedelta(seconds=history_budget),
+                                       archive_storage=archive_storage)
     return factory, season, clock, bootstrap, fixtures, calls, overrides, run
 
 
@@ -67,6 +79,170 @@ async def stored(factory, season):
             [(r.id, r.now_cost) for r in (await session.scalars(select(Player).where(Player.season_id == season).order_by(Player.id))).all()],
             [(r.id, r.home_team_id, r.away_team_id) for r in (await session.scalars(select(Fixture).where(Fixture.season_id == season).order_by(Fixture.id))).all()],
         )
+
+
+class FakeArchiveStorage:
+    def __init__(self, *, objects=None, failure=None, on_upload=None):
+        self.objects = list(objects or [])
+        self.failure = failure
+        self.on_upload = on_upload
+        self.uploads = []
+        self.deleted = []
+
+    async def list_objects(self):
+        if self.failure == "list":
+            raise ArchiveError("transport")
+        return list(self.objects)
+
+    async def delete_objects(self, keys):
+        self.deleted.extend(keys)
+        self.objects = [obj for obj in self.objects if obj.key not in keys]
+
+    async def upload(self, key, content, content_type):
+        if self.on_upload is not None:
+            await self.on_upload()
+        if self.failure == "duplicate":
+            raise ArchiveError("duplicate_key")
+        if self.failure == "upload":
+            raise ArchiveError("transport")
+        self.uploads.append((key, content, content_type))
+
+
+def archive_inputs(bootstrap, fixtures, now):
+    return dict(bootstrap=bootstrap, fixtures=fixtures, season_id=SEASON,
+                rules_version="synthetic-v1", collected_from=now,
+                collected_to=now, published_at=now, allowance_bytes=10_000_000)
+
+
+async def test_archive_uploads_after_database_commit(ingestion):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    observed = []
+    async def check_commit():
+        published_state = await state(factory, season)
+        observed.append(published_state is not None and published_state.last_success_at is not None)
+    storage = FakeArchiveStorage(on_upload=check_commit)
+    result = await run(archive_storage=storage)
+    assert result.shared_published and result.archive.status == "captured"
+    assert observed == [True, True]
+
+
+async def test_archive_failure_does_not_roll_back_publication(ingestion):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    result = await run(archive_storage=FakeArchiveStorage(failure="upload"))
+    assert result.shared_published and result.status == "success"
+    assert (await state(factory, season)).last_success_at is not None
+    assert len((await stored(factory, season))[1]) == len(fixtures)
+
+
+async def test_archive_failure_is_recorded_as_missed_capture(ingestion, caplog):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    with caplog.at_level(logging.WARNING, logger="fpl_optimizer"):
+        result = await run(archive_storage=FakeArchiveStorage(failure="upload"))
+    assert result.archive.status == "missed" and result.archive.category == "transport"
+    assert "captured=0 missed=1 category=transport" in caplog.text
+    clock.advance(4 * 3600)
+    misconfigured = await run(archive_storage=FakeArchiveStorage(), archive_allowance="invalid")
+    assert misconfigured.shared_published and misconfigured.status == "success"
+    assert misconfigured.archive.status == "missed" and misconfigured.archive.category == "not_configured"
+
+
+async def test_archive_keys_are_immutable_and_duplicate_is_reported(ingestion, caplog):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    with caplog.at_level(logging.WARNING, logger="fpl_optimizer"):
+        result = await run(archive_storage=FakeArchiveStorage(failure="duplicate"))
+    assert result.archive.status == "missed" and result.archive.category == "duplicate_key"
+    assert "category=duplicate_key" in caplog.text
+    storage = FakeArchiveStorage()
+    values = archive_inputs(bootstrap, fixtures, clock.now())
+    first = await archive_shared_publication(storage, **values)
+    second = await archive_shared_publication(storage, **values)
+    assert first.key != second.key
+    assert len({key for key, _, _ in storage.uploads}) == 4
+
+
+async def test_archive_metadata_has_checksum_versions_and_deadline(ingestion):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    storage = FakeArchiveStorage()
+    result = await run(archive_storage=storage)
+    payload_key, compressed, _ = storage.uploads[0]
+    metadata_key, raw_metadata, _ = storage.uploads[1]
+    meta = json.loads(raw_metadata)
+    assert payload_key.endswith(".json.gz") and metadata_key == payload_key.removesuffix(".json.gz") + ".meta.json"
+    assert meta["sha256_gzip"] == hashlib.sha256(compressed).hexdigest() == result.archive.checksum
+    assert meta["schema_version"] == "raw-shared-snapshot-v1"
+    assert meta["rules_version"] == "synthetic-v1" and meta["model_version"] is None
+    assert meta["target_event"] == 2
+    assert datetime.fromisoformat(meta["target_deadline"]) == datetime.fromisoformat(
+        bootstrap["events"][1]["deadline_time"].replace("Z", "+00:00"))
+    assert meta["collection_started_at"] and meta["collection_finished_at"]
+    assert meta["source_endpoints"] == ["/api/bootstrap-static/", "/api/fixtures/"]
+
+
+async def test_archive_contains_no_manager_state(ingestion):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    bootstrap["archive_probe"] = "unprojected-public-field"
+    storage = FakeArchiveStorage()
+    await run(archive_storage=storage)
+    data = json.loads(gzip.decompress(storage.uploads[0][1]))
+    assert set(data) == {"bootstrap_static", "fixtures"}
+    assert data["bootstrap_static"] == bootstrap and data["fixtures"] == fixtures
+    assert data["bootstrap_static"]["archive_probe"] == "unprojected-public-field"
+    assert all(word not in json.dumps(data).lower()
+               for word in ("manager_state", "confirmed_squad", "bank_balance"))
+
+
+async def test_archive_logs_no_credentials_or_hosts(ingestion, caplog):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    class UnsafeFailure(FakeArchiveStorage):
+        async def list_objects(self):
+            raise ArchiveError("SECRET https://unsafe.example.invalid/storage/v1")
+    with caplog.at_level(logging.WARNING, logger="fpl_optimizer"):
+        result = await run(archive_storage=UnsafeFailure())
+    assert result.archive.category == "archive_internal"
+    assert "SECRET" not in caplog.text and "example.invalid" not in caplog.text
+
+
+async def test_final_24h_objects_are_not_pruned_as_intraday(ingestion):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    bootstrap["events"][1]["deadline_time"] = (clock.now() + timedelta(hours=12)).isoformat()
+    storage = FakeArchiveStorage()
+    await run(archive_storage=storage)
+    key = storage.uploads[0][0]
+    meta = json.loads(storage.uploads[1][1])
+    assert "/deadline-window/" in key and meta["capture_class"] == "deadline_window"
+    old = StoredObject(key, len(storage.uploads[0][1]), clock.now() - timedelta(days=31))
+    assert expired_intraday_keys([old], clock.now()) == []
+
+
+async def test_prune_only_deletes_expired_intraday_objects(ingestion):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    now = clock.now()
+    old = now - timedelta(days=31)
+    objects = [StoredObject("raw-shared/intraday/a.json.gz", 10, old),
+               StoredObject("raw-shared/intraday/a.meta.json", 10, old),
+               StoredObject("raw-shared/intraday/recent.json.gz", 10, now),
+               StoredObject("raw-shared/deadline-window/old.json.gz", 10, old),
+               StoredObject("forecast/deadline/old.json.gz", 10, old)]
+    storage = FakeArchiveStorage(objects=objects)
+    await run(archive_storage=storage)
+    assert storage.deleted == [objects[0].key, objects[1].key]
+
+
+async def test_archive_warns_at_80_percent_allowance(ingestion, caplog):
+    factory, season, clock, bootstrap, fixtures, calls, overrides, run = ingestion
+    # Existing bucket use accounts for every object, including other namespaces.
+    storage = FakeArchiveStorage(objects=[StoredObject("forecast/retained.json", 8_000_000, clock.now())])
+    with caplog.at_level(logging.WARNING, logger="fpl_optimizer"):
+        result = await run(archive_storage=storage)
+    assert result.archive.allowance_warning and result.archive.status == "captured"
+    assert "allowance_at_or_above_80_percent=1" in caplog.text
+    assert storage.deleted == []
+    # Insufficient capacity cannot remove an existing deadline-window bundle.
+    blocked = FakeArchiveStorage(objects=[StoredObject(
+        "raw-shared/deadline-window/retained.json.gz", 10_000_000, clock.now())])
+    outcome = await archive_shared_publication(blocked, **archive_inputs(bootstrap, fixtures, clock.now()))
+    assert outcome.status == "missed" and outcome.category == "capacity"
+    assert blocked.deleted == [] and blocked.uploads == []
 
 
 async def test_failed_validation_preserves_last_good_publication_and_success_time(ingestion, caplog):

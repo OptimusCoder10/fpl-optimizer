@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     fpl_rules_version: str | None = Field(default=None, min_length=1, max_length=64)
     fpl_run_budget_seconds: float = Field(default=660, gt=0, allow_inf_nan=False)
     fpl_history_budget_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    fpl_storage_url: str | None = None
+    fpl_storage_key: SecretStr | None = None
+    fpl_storage_bucket: str | None = None
+    fpl_storage_allowance_bytes: str | None = None
+
+    @field_validator("fpl_storage_url", "fpl_storage_key", "fpl_storage_bucket",
+                     "fpl_storage_allowance_bytes", mode="before")
+    @classmethod
+    def empty_storage_setting_is_unset(cls, value: object) -> object:
+        return None if value == "" else value
 
     @field_validator("frontend_origin")
     @classmethod

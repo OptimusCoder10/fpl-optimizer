@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
@@ -32,6 +32,7 @@ class FetchResult(Generic[T]):
     data: T | None = None
     category: FailureCategory | None = None
     budget_exhausted: bool = False
+    raw_shared_payload: Any | None = None
 
     def __post_init__(self):
         if (self.status == "success") != (self.data is not None):

@@ -142,7 +142,11 @@ class FPLClient:
                             data = model.model_validate(raw)
                             if self.remaining() <= 0:
                                 return self._budget_failure()
-                            return FetchResult("success", self.clock(), data=data)
+                            return FetchResult(
+                                "success", self.clock(), data=data,
+                                raw_shared_payload=(raw if path in {"bootstrap-static/", "fixtures/"}
+                                                    else None),
+                            )
             except (httpx.RemoteProtocolError, httpx.DecodingError, ValueError):
                 # Incomplete framing/JSON/schema never supplies usable evidence.
                 return FetchResult("truncated_or_invalid", self.clock(), category="truncated_or_invalid")

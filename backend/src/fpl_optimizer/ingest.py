@@ -20,6 +20,9 @@ from fpl_optimizer.schemas.fixtures import (
 from fpl_optimizer.services.fpl_http import FPLClient
 from fpl_optimizer.services.history_population import PopulationResult, _populate_history_locked
 from fpl_optimizer.services.shared_catalog import _write_shared_catalog
+from fpl_optimizer.services.shared_archive import (
+    ArchiveError, ArchiveResult, SupabaseStorage, archive_shared_publication,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,7 @@ class IngestionResult:
     shared_published: bool = False
     history: PopulationResult | None = None
     category: str | None = None
+    archive: ArchiveResult | None = None
 
 
 async def _shared_due(session, season_id, now):
@@ -60,6 +64,7 @@ async def _record_shared_failure(factory, connection, season_id, attempted_at, c
 async def run_ingestion(
     session_factory, client: FPLClient, *, season_id: str, rules_version: str,
     settings: Settings, history_budget: timedelta = timedelta(minutes=10),
+    archive_storage=None,
 ) -> IngestionResult:
     if season_id not in SEASON_CLUB_COUNTS:
         raise ValueError("season has no reviewed fixture completeness policy")
@@ -73,11 +78,14 @@ async def run_ingestion(
             await require_same_database(connection, await session.connection())
             due = await _shared_due(session, season_id, client.clock())
         published = False
+        archive_result = None
         if due:
             observed_at = client.clock()
             try:
-                bootstrap = (await client.bootstrap()).require_data()
-                fixtures = (await client.fixtures()).require_data()
+                bootstrap_fetch = await client.bootstrap()
+                bootstrap = bootstrap_fetch.require_data()
+                fixtures_fetch = await client.fixtures()
+                fixtures = fixtures_fetch.require_data()
                 envelope = validate_full_season(season_id, bootstrap, fixtures)
             except (FetchFailure, IncompleteFixtures, ValidationError) as error:
                 category = (error.category if isinstance(error, FetchFailure)
@@ -90,11 +98,12 @@ async def run_ingestion(
                     "budget_exhausted" if client.exhausted else "failed", category=category,
                 )
             try:
+                published_at = client.clock()
                 async with session_factory.begin() as session:
                     await require_same_database(connection, await session.connection())
                     await _write_shared_catalog(session, envelope, SharedPublication(
                         season_id=season_id, rules_version=rules_version,
-                        source_observed_at=observed_at, published_at=client.clock(),
+                        source_observed_at=observed_at, published_at=published_at,
                     ))
                     state = await session.get(CacheMetadata, (season_id, "shared"))
                     state.last_attempt_at = observed_at
@@ -108,8 +117,52 @@ async def run_ingestion(
             published = True
             logger.info("Shared ingestion: success=1 failed=0 clubs=%d players=%d fixtures=%d",
                         len(bootstrap.teams), len(bootstrap.elements), len(fixtures.root))
+            if archive_storage is not None or any((
+                settings.fpl_storage_url, settings.fpl_storage_key,
+                settings.fpl_storage_bucket, settings.fpl_storage_allowance_bytes,
+            )):
+                try:
+                    if settings.fpl_storage_allowance_bytes is None:
+                        raise ArchiveError("not_configured")
+                    try:
+                        allowance_bytes = int(settings.fpl_storage_allowance_bytes)
+                    except (TypeError, ValueError):
+                        raise ArchiveError("not_configured") from None
+                    if allowance_bytes <= 0:
+                        raise ArchiveError("not_configured")
+                    storage = archive_storage or SupabaseStorage(settings)
+                    async with asyncio.timeout(60):
+                        archive_result = await archive_shared_publication(
+                            storage, bootstrap=bootstrap_fetch.raw_shared_payload,
+                            fixtures=fixtures_fetch.raw_shared_payload,
+                            season_id=season_id, rules_version=rules_version,
+                            collected_from=observed_at,
+                            collected_to=fixtures_fetch.fetched_at,
+                            published_at=published_at,
+                            allowance_bytes=allowance_bytes,
+                        )
+                except ArchiveError as error:
+                    safe_category = error.category if error.category in {
+                        "transport", "storage_response", "duplicate_key", "listing_invalid",
+                        "raw_payload_unavailable", "not_configured",
+                    } else "archive_internal"
+                    archive_result = ArchiveResult("missed", safe_category)
+                except Exception:
+                    # Storage and serialization errors cannot invalidate committed data.
+                    archive_result = ArchiveResult("missed", "archive_internal")
+                if archive_result.status == "missed":
+                    logger.warning("Shared archive: captured=0 missed=1 category=%s",
+                                   archive_result.category)
+                else:
+                    logger.info("Shared archive: captured=1 missed=0")
+                if archive_result.allowance_warning:
+                    logger.warning("Shared archive: allowance_at_or_above_80_percent=1")
+            else:
+                archive_result = ArchiveResult("missed", "not_configured")
+                logger.warning("Shared archive: captured=0 missed=1 category=not_configured")
         if client.exhausted or client.remaining() <= 0:
-            return IngestionResult("budget_exhausted", shared_published=published)
+            return IngestionResult("budget_exhausted", shared_published=published,
+                                   archive=archive_result)
         client.deadline = min(client.deadline, client.elapsed_clock() + history_budget.total_seconds())
 
         async def fetch_history(player_id):
@@ -124,7 +177,7 @@ async def run_ingestion(
         )
         status = ("budget_exhausted" if history.budget_exhausted
                   else "partial" if history.failed else "success")
-        return IngestionResult(status, published, history)
+        return IngestionResult(status, published, history, archive=archive_result)
 
 
 async def _main() -> int:
