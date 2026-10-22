@@ -3,6 +3,8 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from fpl_optimizer.services.history_eligibility import (
     HistoryEligibilityView, PlayerHistoryEvidence, RequiredFixture,
     decide_history_eligibility,
@@ -169,3 +171,85 @@ def test_age_limits_have_one_source_for_population_and_gate(monkeypatch):
     assert decide(player(), mode="lineup", shared_age=timedelta(hours=7)).blocked is False
     monkeypatch.setattr(history_eligibility, "LINEUP_SHARED_AGE_LIMIT", timedelta(hours=2))
     assert decide(player(), mode="lineup", shared_age=timedelta(hours=7)).blocked is True
+
+
+def test_empty_history_non_new_player_cannot_use_prior():
+    p = player(covered_fixture_ids=frozenset(), covered_finalized_fixture_ids=frozenset(),
+               validated_empty_new_player=False)
+    result = decide(p).candidates[0]
+    assert (result.status, result.action, result.may_use_prior,
+            result.usable_finalized_fixture_ids) == ("current", "use", False, ())
+
+
+def test_target_event_fixture_is_ignored_for_finalized_coverage():
+    p = player(required_fixtures=(fixture(NOW - timedelta(hours=3), event=9),))
+    result = decide(p).candidates[0]
+    assert (result.status, result.action, result.usable_finalized_fixture_ids) == (
+        "current", "use", (101,),
+    )
+    assert 102 not in result.usable_finalized_fixture_ids
+
+
+def test_recorded_missing_and_invalid_fixture_ids_mark_history_stale():
+    p = player(missing_fixture_ids=(102,), invalid_fixture_ids=(103,))
+    result = decide(p).candidates[0]
+    assert (result.status, result.action) == ("stale", "exclude")
+    assert "102" in result.reason
+    assert "103" in result.reason
+
+
+def test_stale_shared_catalog_blocks_transfers_mode():
+    for mode in ("transfers", "simulator"):
+        result = decide(player(), mode=mode, shared_age=timedelta(hours=7))
+        assert (result.shared_status, result.blocked, result.candidates[0].action) == (
+            "stale", True, "BLOCK",
+        )
+
+
+def test_unknown_shared_catalog_blocks_every_mode():
+    unknown = check_shared_freshness(
+        source_observed_at=None, last_success_at=None, now=NOW, next_deadline=DEADLINE,
+    )
+    for mode in ("lineup", "transfers", "simulator"):
+        result = decide_history_eligibility(
+            replace(view(player()), shared=unknown), now=NOW, mode=mode,
+            owned_player_ids=frozenset(), locked_player_ids=frozenset(), target_event=9,
+        )
+        assert (result.shared_status, result.blocked, result.candidates[0].action) == (
+            "unknown", True, "BLOCK",
+        )
+
+
+def test_input_guards_reject_invalid_inputs():
+    base = view(player())
+    inputs = dict(now=NOW, mode="transfers", owned_player_ids=frozenset(),
+                  locked_player_ids=frozenset(), target_event=9)
+
+    def check(expected, candidate_view=base, **changes):
+        with pytest.raises(ValueError, match=expected):
+            decide_history_eligibility(candidate_view, **(inputs | changes))
+
+    check("unsupported mode", mode="unsupported")
+    check("target_event must be positive", target_event=0)
+    check("duplicate player evidence", replace(base, players=(player(), player())))
+    check("required owned or locked player missing from view", owned_player_ids=frozenset({2}))
+    check("required owned or locked player missing from view", locked_player_ids=frozenset({2}))
+    check("now must include a UTC offset", now=NOW.replace(tzinfo=None))
+    check("history publication chronology is invalid", replace(base, players=(
+        player(last_success_at=NOW + timedelta(seconds=1)),
+    )))
+    check("finalization observation is in the future", replace(base, players=(
+        player(required_fixtures=(fixture(NOW + timedelta(seconds=1)),)),
+    )))
+    check("finalized coverage must be a subset of validated rows", replace(base, players=(
+        player(covered_finalized_fixture_ids=frozenset({101, 102})),
+    )))
+
+
+def test_lineup_stale_player_in_grace_period_reports_both_reasons():
+    p = player(age=timedelta(hours=50),
+               required_fixtures=(fixture(NOW - timedelta(minutes=30)),))
+    result = decide(p, mode="lineup").candidates[0]
+    assert (result.status, result.warning, result.action) == ("stale", True, "use")
+    assert "lineup allowance" in result.reason
+    assert "using previous finalized history during coverage grace" in result.reason

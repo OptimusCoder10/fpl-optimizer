@@ -189,10 +189,10 @@ def decide_history_eligibility(
                 )
             elif pending:
                 warning = True
-                if status == "current":
-                    reason = "using previous finalized history during coverage grace: " + ", ".join(
-                        str(x) for x in sorted(set(pending))
-                    )
+                grace_reason = "using previous finalized history during coverage grace: " + ", ".join(
+                    str(x) for x in sorted(set(pending))
+                )
+                reason = grace_reason if status == "current" else f"{reason}; {grace_reason}"
             allowed_lineup_age = (mode == "lineup" and age <= LINEUP_HISTORY_AGE_LIMIT
                                   and not missing)
             if status == "current" or allowed_lineup_age:
