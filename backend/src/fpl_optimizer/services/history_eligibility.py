@@ -10,6 +10,9 @@ from fpl_optimizer.services.shared_freshness import SharedFreshness
 Mode = Literal["lineup", "transfers", "simulator"]
 Status = Literal["current", "stale", "unknown"]
 Action = Literal["use", "exclude", "BLOCK"]
+HISTORY_AGE_LIMIT = timedelta(hours=48)
+LINEUP_HISTORY_AGE_LIMIT = timedelta(hours=96)
+LINEUP_SHARED_AGE_LIMIT = timedelta(hours=24)
 
 
 @dataclass(frozen=True)
@@ -120,7 +123,7 @@ def decide_history_eligibility(
     elif shared.status == "stale":
         shared_reason = "shared catalog outside current freshness limit"
     if mode == "lineup" and shared.status != "unknown" and shared.source_age is not None:
-        if shared.source_age <= timedelta(hours=24):
+        if shared.source_age <= LINEUP_SHARED_AGE_LIMIT:
             if shared.status == "stale":
                 shared_warning = True
                 shared_reason = "shared catalog within lineup allowance (warning)"
@@ -129,7 +132,7 @@ def decide_history_eligibility(
     shared_blocked = shared.status == "unknown" or (
         shared.status == "stale" and (
             mode != "lineup" or shared.source_age is None
-            or shared.source_age > timedelta(hours=24)
+            or shared.source_age > LINEUP_SHARED_AGE_LIMIT
         )
     )
 
@@ -138,7 +141,7 @@ def decide_history_eligibility(
         if not player.covered_finalized_fixture_ids <= player.covered_fixture_ids:
             raise ValueError("finalized coverage must be a subset of validated rows")
         required = player_id in owned_player_ids or player_id in locked_player_ids
-        age_limit = timedelta(hours=96 if mode == "lineup" else 48)
+        age_limit = LINEUP_HISTORY_AGE_LIMIT if mode == "lineup" else HISTORY_AGE_LIMIT
         status: Status = "unknown"
         reason = "no validated player history publication"
         warning = False
@@ -156,7 +159,7 @@ def decide_history_eligibility(
             if age > age_limit:
                 status = "stale"
                 reason = f"player history older than {int(age_limit.total_seconds() // 3600)} hours"
-            elif mode == "lineup" and age > timedelta(hours=48):
+            elif mode == "lineup" and age > HISTORY_AGE_LIMIT:
                 status = "stale"
                 warning = True
                 reason = "player history within lineup allowance (warning)"
@@ -190,7 +193,7 @@ def decide_history_eligibility(
                     reason = "using previous finalized history during coverage grace: " + ", ".join(
                         str(x) for x in sorted(set(pending))
                     )
-            allowed_lineup_age = (mode == "lineup" and age <= timedelta(hours=96)
+            allowed_lineup_age = (mode == "lineup" and age <= LINEUP_HISTORY_AGE_LIMIT
                                   and not missing)
             if status == "current" or allowed_lineup_age:
                 # The checkpoint subset excludes provisional rows. The target event

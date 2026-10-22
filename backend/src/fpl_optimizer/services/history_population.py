@@ -29,11 +29,11 @@ from fpl_optimizer.schemas.element_summary import (
     PlayerHistoryPublication,
 )
 from fpl_optimizer.services import player_history
+from fpl_optimizer.services.history_eligibility import HISTORY_AGE_LIMIT
 
 
 logger = logging.getLogger(__name__)
 REFRESH_INTERVAL = timedelta(days=1)
-HISTORY_AGE_LIMIT = timedelta(hours=48)
 
 
 class _StatementCounts:

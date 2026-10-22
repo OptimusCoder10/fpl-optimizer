@@ -7,6 +7,7 @@ from fpl_optimizer.services.history_eligibility import (
     HistoryEligibilityView, PlayerHistoryEvidence, RequiredFixture,
     decide_history_eligibility,
 )
+from fpl_optimizer.services import history_eligibility, history_population
 from fpl_optimizer.services.shared_freshness import check_shared_freshness
 
 
@@ -155,3 +156,16 @@ def test_decisions_are_deterministic_for_same_inputs():
     first = decide_history_eligibility(input_view, **kwargs)
     assert first == decide_history_eligibility(input_view, **kwargs)
     assert [p.player_id for p in first.candidates] == [1, 2]
+
+
+def test_age_limits_have_one_source_for_population_and_gate(monkeypatch):
+    assert history_population.HISTORY_AGE_LIMIT is history_eligibility.HISTORY_AGE_LIMIT
+    assert decide(player(age=timedelta(hours=3))).candidates[0].action == "use"
+    monkeypatch.setattr(history_eligibility, "HISTORY_AGE_LIMIT", timedelta(hours=2))
+    assert decide(player(age=timedelta(hours=3))).candidates[0].action == "exclude"
+    assert decide(player(age=timedelta(hours=3)), mode="lineup").candidates[0].warning
+    monkeypatch.setattr(history_eligibility, "LINEUP_HISTORY_AGE_LIMIT", timedelta(hours=2))
+    assert decide(player(age=timedelta(hours=3)), mode="lineup").candidates[0].action == "exclude"
+    assert decide(player(), mode="lineup", shared_age=timedelta(hours=7)).blocked is False
+    monkeypatch.setattr(history_eligibility, "LINEUP_SHARED_AGE_LIMIT", timedelta(hours=2))
+    assert decide(player(), mode="lineup", shared_age=timedelta(hours=7)).blocked is True
