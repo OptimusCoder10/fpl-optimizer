@@ -115,6 +115,12 @@ def test_fixtures_before_last_row_never_required():
     assert result.required_fixtures == result.within_grace == ()
 
 
+def test_anchor_fixture_itself_is_never_required():
+    result = derive(fixtures=(fixture(100, kickoff=ANCHOR_TIME),))
+    assert result.anchor_fixture_id == 100
+    assert result.required_fixtures == result.within_grace == ()
+
+
 def test_other_clubs_fixtures_never_required():
     result = derive(fixtures=(fixture(club=2, opponent=3),))
     assert result.required_fixtures == result.within_grace == ()

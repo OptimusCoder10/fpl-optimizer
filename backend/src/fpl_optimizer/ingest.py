@@ -18,6 +18,7 @@ from fpl_optimizer.schemas.fixtures import (
     IncompleteFixtures, SEASON_CLUB_COUNTS, validate_full_season,
 )
 from fpl_optimizer.services.fpl_http import FPLClient
+from fpl_optimizer.services.history_coverage_shadow import collect_history_coverage_shadow
 from fpl_optimizer.services.history_population import PopulationResult, _populate_history_locked
 from fpl_optimizer.services.shared_catalog import _write_shared_catalog
 from fpl_optimizer.services.shared_archive import (
@@ -25,6 +26,7 @@ from fpl_optimizer.services.shared_archive import (
 )
 
 logger = logging.getLogger(__name__)
+SHADOW_MIN_BUDGET_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -175,6 +177,23 @@ async def run_ingestion(
             pacing_elapsed=lambda: client.player_pacing_seconds,
             db_diagnostics=True,
         )
+        # History has emitted its count line and detached statement diagnostics.
+        # This read remains under the same ingestion lock and the remaining budget.
+        remaining = client.remaining()
+        if remaining < SHADOW_MIN_BUDGET_SECONDS:
+            logger.info("Coverage shadow: category=insufficient_budget")
+        else:
+            try:
+                async with asyncio.timeout(remaining):
+                    counts = await collect_history_coverage_shadow(
+                        session_factory, season_id, now=client.clock(),
+                    )
+                logger.info(counts.log_line())
+            except TimeoutError:
+                logger.warning("Coverage shadow: category=timeout")
+            except Exception:
+                # Diagnostic reads cannot change ingestion's published result.
+                logger.warning("Coverage shadow: category=read_failure")
         status = ("budget_exhausted" if history.budget_exhausted
                   else "partial" if history.failed else "success")
         return IngestionResult(status, published, history, archive=archive_result)
