@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fpl_optimizer.config import Settings
 from fpl_optimizer.db.advisory_lock import ingestion_lock, require_same_database
-from fpl_optimizer.db.models import CacheMetadata, Player
+from fpl_optimizer.db.models import CacheMetadata, Fixture, Gameweek, Player
 from fpl_optimizer.schemas.bootstrap import require_aware_datetime
 from fpl_optimizer.schemas.fetch import FetchFailure
 from fpl_optimizer.schemas.element_summary import (
@@ -217,6 +217,31 @@ async def _populate_history_body(
     async with session_factory.begin() as session:
         await require_same_database(lock_connection, await session.connection())
         await _discover_required_players(session, season_id, now)
+        # Incremental due marker only. Required-fixture validation and live
+        # player-specific eligibility assembly remain separate work.
+        newly_observed = (
+            select(Fixture.id)
+            .join(Gameweek, (Gameweek.season_id == Fixture.season_id)
+                  & (Gameweek.id == Fixture.gameweek_id))
+            .where(
+                Fixture.season_id == CacheMetadata.season_id,
+                Fixture.gameweek_data_checked_at.is_not(None),
+                Gameweek.data_checked.is_(True),
+                Fixture.gameweek_data_checked_at > CacheMetadata.last_success_at,
+            )
+            .exists()
+        )
+        marked_due = (await session.execute(
+            update(CacheMetadata)
+            .where(
+                CacheMetadata.season_id == season_id,
+                CacheMetadata.key.startswith(player_history.PLAYER_HISTORY_KEY_PREFIX),
+                CacheMetadata.last_success_at.is_not(None),
+                CacheMetadata.history_due_at > now,
+                newly_observed,
+            )
+            .values(history_due_at=now)
+        )).rowcount
         catalog = await player_history._load_catalog_snapshot(session, season_id)
 
     async with session_factory() as session:
@@ -367,12 +392,12 @@ async def _populate_history_body(
     other_seconds = max(0.0, elapsed_clock() - run_started - fetch_seconds
                         - pacing_seconds - commit_seconds)
     message = (
-        "History population: success=%d failed=%d pending=%d required=%d "
+        "History population: success=%d failed=%d pending=%d required=%d marked_due=%d "
         "fetch_s=%.3f pacing_s=%.3f commit_s=%.3f other_s=%.3f "
         "fetch_avg_s=%.3f fetch_max_s=%.3f commit_avg_s=%.3f commit_max_s=%.3f"
     )
     values = (
-        result.succeeded, result.failed, result.pending, result.required,
+        result.succeeded, result.failed, result.pending, result.required, marked_due,
         fetch_seconds, pacing_seconds, commit_seconds, other_seconds,
         fetch_seconds / attempted if attempted else 0.0, max_fetch,
         commit_seconds / attempted if attempted else 0.0, max_commit,

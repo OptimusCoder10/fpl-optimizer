@@ -11,7 +11,7 @@ from sqlalchemy import delete, event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fpl_optimizer.db.advisory_lock import ingestion_lock
-from fpl_optimizer.db.models import CacheMetadata, Fixture, Player
+from fpl_optimizer.db.models import CacheMetadata, Fixture, Gameweek, Player
 from fpl_optimizer.db.session import create_session_factory
 from fpl_optimizer.schemas.fixtures import SharedCatalogEnvelope
 from fpl_optimizer.services import history_population, player_history
@@ -21,7 +21,12 @@ from test_player_history import load_json_fixture, publish_catalog, shared_envel
 
 
 pytestmark = pytest.mark.database
-SEASONS = count(2060)
+SEASONS = count(4060)
+
+
+@pytest.fixture(autouse=True)
+def capture_history_info(caplog):
+    caplog.set_level(logging.INFO, logger="fpl_optimizer")
 
 
 class FakeClock:
@@ -86,6 +91,232 @@ async def checkpoints(factory, season):
         ).all()}
 
 
+async def observe_finalization(factory, season, observed, *, checked=True, fixture_id=371):
+    async with factory.begin() as session:
+        await session.execute(update(Gameweek).where(
+            Gameweek.season_id == season, Gameweek.id == 38,
+        ).values(data_checked=checked))
+        await session.execute(update(Fixture).where(
+            Fixture.season_id == season, Fixture.id == fixture_id,
+        ).values(gameweek_data_checked_at=observed))
+
+
+async def mark_without_fetch(run):
+    return await run(budget=timedelta(0))
+
+
+def marked_line(caplog):
+    return [record.message for record in caplog.records
+            if record.message.startswith("History population:")][-1]
+
+
+async def test_finalization_marks_successful_players_whose_success_predates_observation(
+    population, caplog,
+):
+    factory, season, clock, _, run = population
+    await run()
+    clock.advance(timedelta(hours=1))
+    await observe_finalization(factory, season, clock.now())
+    await mark_without_fetch(run)
+    states = await checkpoints(factory, season)
+    assert {state.history_due_at for state in states.values()} == {clock.now()}
+    assert "marked_due=2" in marked_line(caplog)
+
+
+async def test_player_refreshed_after_observation_is_not_marked(population, caplog):
+    factory, season, clock, _, run = population
+    await run()
+    observed = clock.now() + timedelta(minutes=1)
+    clock.advance(timedelta(minutes=2))
+    await observe_finalization(factory, season, observed)
+    async with factory.begin() as session:
+        await session.execute(update(CacheMetadata).where(
+            CacheMetadata.season_id == season,
+            CacheMetadata.key.startswith("history/player/"),
+        ).values(last_success_at=clock.now()))
+    before = await checkpoints(factory, season)
+    await mark_without_fetch(run)
+    after = await checkpoints(factory, season)
+    assert {p: s.history_due_at for p, s in after.items()} == {
+        p: s.history_due_at for p, s in before.items()
+    }
+    assert "marked_due=0" in marked_line(caplog)
+
+
+async def test_no_marking_without_observation_or_when_gameweek_not_data_checked(
+    population, caplog,
+):
+    factory, season, clock, _, run = population
+    await run()
+    clock.advance(timedelta(minutes=2))
+    await mark_without_fetch(run)
+    assert "marked_due=0" in marked_line(caplog)
+    await observe_finalization(factory, season, clock.now(), checked=False)
+    await mark_without_fetch(run)
+    assert "marked_due=0" in marked_line(caplog)
+    assert all(s.history_due_at > clock.now() for s in (await checkpoints(factory, season)).values())
+
+
+async def test_retry_backoff_survives_marking(population, caplog):
+    factory, season, clock, fetcher, run = population
+    await run()
+    clock.advance(timedelta(minutes=1))
+    async with factory.begin() as session:
+        await session.execute(update(CacheMetadata).where(
+            CacheMetadata.season_id == season, CacheMetadata.key == "history/player/1",
+        ).values(next_retry_at=clock.now() + timedelta(hours=2), retry_count=2,
+                 last_error="prior failure"))
+    await observe_finalization(factory, season, clock.now())
+    fetcher.calls.clear()
+    await run()
+    assert fetcher.calls == [5]
+    state = (await checkpoints(factory, season))[1]
+    assert state.history_due_at < state.next_retry_at
+    assert (state.retry_count, state.last_error) == (2, "prior failure")
+    assert "marked_due=2" in marked_line(caplog)
+
+
+async def test_marking_never_changes_success_rows_coverage_or_retry_state(population):
+    factory, season, clock, _, run = population
+    await run()
+    before = await checkpoints(factory, season)
+    async with factory() as session:
+        prior = await player_history.read_player_history(session, season, 1)
+    clock.advance(timedelta(minutes=1))
+    await observe_finalization(factory, season, clock.now())
+    await mark_without_fetch(run)
+    after = await checkpoints(factory, season)
+    async with factory() as session:
+        current = await player_history.read_player_history(session, season, 1)
+    for player_id in before:
+        for field in ("last_success_at", "source_observed_at", "publication_version",
+                      "covered_fixture_ids", "covered_finalized_fixture_ids",
+                      "next_retry_at", "last_error", "retry_count"):
+            assert getattr(after[player_id], field) == getattr(before[player_id], field)
+    columns = ("fixture_id", "total_points", "publication_version")
+    assert [tuple(getattr(row, field) for field in columns) for row in current.rows] == [
+        tuple(getattr(row, field) for field in columns) for row in prior.rows
+    ]
+
+
+async def test_marking_only_updates_changing_rows_and_is_idempotent(population, caplog):
+    factory, season, clock, _, run = population
+    await run()
+    clock.advance(timedelta(minutes=1))
+    await observe_finalization(factory, season, clock.now())
+    await mark_without_fetch(run)
+    assert "marked_due=2" in marked_line(caplog)
+    first = await checkpoints(factory, season)
+    await mark_without_fetch(run)
+    assert "marked_due=0" in marked_line(caplog)
+    second = await checkpoints(factory, season)
+    assert {p: s.history_due_at for p, s in second.items()} == {
+        p: s.history_due_at for p, s in first.items()
+    }
+    clock.advance(timedelta(minutes=1))
+    await mark_without_fetch(run)
+    assert "marked_due=0" in marked_line(caplog)
+    assert all(s.history_due_at < clock.now() for s in (await checkpoints(factory, season)).values())
+
+
+async def test_marked_players_refresh_in_oldest_due_then_id_order(population):
+    factory, season, clock, fetcher, run = population
+    await run()
+    await add_player(factory, season, 10)
+    clock.advance(timedelta(minutes=1))
+    await mark_without_fetch(run)
+    clock.advance(timedelta(minutes=1))
+    await observe_finalization(factory, season, clock.now())
+    fetcher.calls.clear()
+    await run()
+    assert fetcher.calls == [10, 1, 5]
+
+
+async def test_pending_players_without_success_are_not_marked(population, caplog):
+    factory, season, clock, _, run = population
+    await run()
+    await add_player(factory, season, 10)
+    clock.advance(timedelta(minutes=1))
+    await mark_without_fetch(run)
+    pending_due = (await checkpoints(factory, season))[10].history_due_at
+    clock.advance(timedelta(minutes=1))
+    await observe_finalization(factory, season, clock.now())
+    await mark_without_fetch(run)
+    assert (await checkpoints(factory, season))[10].history_due_at == pending_due
+    assert "marked_due=2" in marked_line(caplog)
+
+
+async def test_rescheduled_fixture_reset_observation_marks_again(population, caplog):
+    factory, season, clock, _, run = population
+    await run()
+    clock.advance(timedelta(minutes=1))
+    await observe_finalization(factory, season, clock.now())
+    await mark_without_fetch(run)
+    async with factory.begin() as session:
+        await session.execute(update(Fixture).where(
+            Fixture.season_id == season, Fixture.id == 371,
+        ).values(gameweek_id=1, gameweek_data_checked_at=None))
+    clock.advance(timedelta(minutes=1))
+    await mark_without_fetch(run)
+    assert "marked_due=0" in marked_line(caplog)
+    async with factory.begin() as session:
+        await session.execute(update(CacheMetadata).where(
+            CacheMetadata.season_id == season,
+            CacheMetadata.key.startswith("history/player/"),
+        ).values(last_success_at=clock.now(),
+                 history_due_at=clock.now() + timedelta(days=1)))
+        await session.execute(update(Fixture).where(
+            Fixture.season_id == season, Fixture.id == 371,
+        ).values(gameweek_id=38))
+    clock.advance(timedelta(minutes=1))
+    await observe_finalization(factory, season, clock.now())
+    await mark_without_fetch(run)
+    assert "marked_due=2" in marked_line(caplog)
+
+
+async def test_observation_equal_to_success_time_is_not_marked(population, caplog):
+    factory, season, clock, _, run = population
+    await run()
+    await observe_finalization(factory, season, clock.now())
+    await mark_without_fetch(run)
+    assert "marked_due=0" in marked_line(caplog)
+
+
+async def test_marking_is_isolated_per_season(population, migrated_test_engine,
+                                              publication_settings, caplog):
+    factory, season, clock, _, run = population
+    await run()
+    other_year = next(SEASONS)
+    other = f"{other_year}-{str(other_year + 1)[-2:]}"
+    other_factory = await publish_catalog(migrated_test_engine, publication_settings, other)
+    other_clock = FakeClock()
+    await populate_history(other_factory, other, FakeFetcher(), clock=other_clock.now,
+                           budget=timedelta(minutes=10),
+                           elapsed_clock=other_clock.monotonic,
+                           settings=publication_settings)
+    clock.advance(timedelta(minutes=1))
+    await observe_finalization(other_factory, other, clock.now())
+    await mark_without_fetch(run)
+    assert "marked_due=0" in marked_line(caplog)
+    assert all(s.history_due_at > clock.now() for s in (await checkpoints(factory, season)).values())
+
+
+async def test_price_only_shared_update_does_not_mark(population, publication_settings,
+                                                      caplog):
+    factory, season, clock, _, run = population
+    await run()
+    clock.advance(timedelta(minutes=1))
+    catalog = shared_envelope()
+    catalog.bootstrap.elements[0].now_cost += 1
+    context = shared_publication(season).model_copy(update={
+        "source_observed_at": clock.now(), "published_at": clock.now(),
+    })
+    await publish_shared_catalog(factory, catalog, context,
+                                 settings=publication_settings)
+    await mark_without_fetch(run)
+    assert "marked_due=0" in marked_line(caplog)
+
+
 async def test_history_log_reports_exact_aggregate_durations(
     population, publication_settings, monkeypatch, caplog,
 ):
@@ -124,7 +355,7 @@ async def test_history_log_reports_exact_aggregate_durations(
     line = next(record.message for record in caplog.records
                 if record.message.startswith("History population:"))
     assert line == (
-        "History population: success=2 failed=0 pending=0 required=2 "
+        "History population: success=2 failed=0 pending=0 required=2 marked_due=0 "
         "fetch_s=6.000 pacing_s=0.200 commit_s=6.000 other_s=5.000 "
         "fetch_avg_s=3.000 fetch_max_s=4.000 commit_avg_s=3.000 commit_max_s=3.000"
     )
@@ -225,7 +456,7 @@ async def test_history_statement_counts_exact_for_known_player(
                 if record.message.startswith("History population:"))
     assert (result.succeeded, result.pending) == (1, 1)
     assert "stmts_commit_avg=3.000 stmts_commit_max=3" in line
-    assert "stmts_other_avg=15.000" in line
+    assert "stmts_other_avg=16.000" in line
 
 
 async def _measured_player_run(population, publication_settings, monkeypatch):
