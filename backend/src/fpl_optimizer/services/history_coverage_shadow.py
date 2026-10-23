@@ -3,6 +3,7 @@
 The anchor rule cannot see gaps before the last row or for unresolved players.
 Its apparent gaps can be false after an away-and-back club transfer. These
 aggregate counts are observations for later review, never enforcement evidence.
+``gaps_status_not_a`` counts gap players whose catalog status is not ``a``.
 """
 
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ class CoverageShadowCounts:
     players_with_gaps: int = 0
     missing_total: int = 0
     within_grace_total: int = 0
-    gaps_status_u: int = 0
+    gaps_status_not_a: int = 0
 
     def log_line(self) -> str:
         return (
@@ -35,7 +36,8 @@ class CoverageShadowCounts:
             f"unresolved_no_rows={self.unresolved_no_rows} "
             f"unresolved_club_change={self.unresolved_club_change} "
             f"players_with_gaps={self.players_with_gaps} missing_total={self.missing_total} "
-            f"within_grace_total={self.within_grace_total} gaps_status_u={self.gaps_status_u}"
+            f"within_grace_total={self.within_grace_total} "
+            f"gaps_status_not_a={self.gaps_status_not_a}"
         )
 
 
@@ -100,7 +102,7 @@ async def _collect_in_transaction(
                 fixture_id, kickoff, home if was_home else away, minutes,
             ))
 
-    provisional = no_rows = club_change = gap_players = missing_total = grace = status_u = 0
+    provisional = no_rows = club_change = gap_players = missing_total = grace = status_not_a = 0
     for player_id, team_id, status in players:
         derived = derive_history_requirements(
             player_id=player_id, catalog_team_id=team_id,
@@ -119,9 +121,9 @@ async def _collect_in_transaction(
         if missing:
             gap_players += 1
             missing_total += len(missing)
-            status_u += status != "a"
+            status_not_a += status != "a"
 
     return CoverageShadowCounts(
         len(players), provisional, no_rows, club_change, gap_players,
-        missing_total, grace, status_u,
+        missing_total, grace, status_not_a,
     )

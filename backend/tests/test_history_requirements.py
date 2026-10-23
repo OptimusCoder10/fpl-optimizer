@@ -3,6 +3,8 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from fpl_optimizer.services.history_eligibility import (
     HistoryEligibilityView, PlayerHistoryEvidence, RequiredFixture,
     decide_history_eligibility,
@@ -197,3 +199,32 @@ def test_output_maps_to_j42_gate_required_fixture_input():
     assert (missing.status, missing.action) == ("stale", "exclude")
     assert "200" in missing.reason
     assert (present.status, present.action) == ("current", "use")
+
+
+def test_naive_now_or_row_kickoff_raises():
+    with pytest.raises(ValueError, match="now must include a UTC offset"):
+        derive(now=NOW.replace(tzinfo=None))
+    with pytest.raises(ValueError, match="history row kickoff_time must include a UTC offset"):
+        derive(rows=(row(kickoff=ANCHOR_TIME.replace(tzinfo=None)),))
+
+
+def test_naive_fixture_datetimes_raise():
+    with pytest.raises(ValueError, match="fixture kickoff_time must include a UTC offset"):
+        derive(fixtures=(fixture(kickoff=NOW.replace(tzinfo=None)),))
+    with pytest.raises(ValueError, match="first_data_checked_at must include a UTC offset"):
+        derive(fixtures=(fixture(observed=OBSERVED.replace(tzinfo=None)),))
+
+
+def test_non_positive_ids_raise():
+    for player_id, team_id in ((0, 1), (-1, 1), (5, 0), (5, -1)):
+        with pytest.raises(ValueError, match="player and catalog club IDs must be positive"):
+            derive_history_requirements(
+                player_id=player_id, catalog_team_id=team_id,
+                published_rows=(row(),), season_fixtures=(fixture(),), now=NOW,
+            )
+
+
+def test_same_kickoff_higher_fixture_id_is_required():
+    result = derive(fixtures=(fixture(101, kickoff=ANCHOR_TIME),))
+    assert result.anchor_fixture_id == 100
+    assert ids(result) == (101,)

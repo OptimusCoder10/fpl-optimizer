@@ -43,7 +43,7 @@ async def test_shadow_reports_gap_when_finalized_club_fixture_has_no_row(ingesti
         ).values(status="u"))
     counts = await shadow.collect_history_coverage_shadow(factory, season, now=clock.now())
     assert (counts.players, counts.provisional, counts.players_with_gaps,
-            counts.missing_total, counts.gaps_status_u) == (2, 2, 2, 2, 1)
+            counts.missing_total, counts.gaps_status_not_a) == (2, 2, 2, 2, 1)
 
 
 async def test_shadow_reports_no_gap_when_all_required_rows_present(ingestion):
@@ -152,7 +152,7 @@ async def test_shadow_log_line_has_counts_only_no_ids(ingestion, caplog):
     assert re.fullmatch(
         r"Coverage shadow: players=2 provisional=2 unresolved_no_rows=0 "
         r"unresolved_club_change=0 players_with_gaps=0 missing_total=0 "
-        r"within_grace_total=74 gaps_status_u=0", lines[0],
+        r"within_grace_total=74 gaps_status_not_a=0", lines[0],
     )
     assert not any(word in lines[0] for word in ("player_id", "fixture_id", "name", "http", "SELECT"))
 
@@ -172,3 +172,56 @@ async def test_shadow_isolated_per_season(ingestion, migrated_test_engine, publi
     assert after == before
     assert (other_counts.players, other_counts.unresolved_no_rows,
             other_counts.players_with_gaps) == (1, 1, 0)
+
+
+async def test_shadow_insufficient_budget_logs_category_and_skips_read(
+    ingestion, monkeypatch, caplog,
+):
+    _, _, _, _, _, _, _, run = ingestion
+    calls = 0
+
+    async def forbidden(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("shadow collector must not run below five seconds")
+
+    monkeypatch.setattr(ingest, "collect_history_coverage_shadow", forbidden)
+    with caplog.at_level(logging.INFO, logger="fpl_optimizer.ingest"):
+        result = await run(budget=4)
+    assert calls == 0
+    assert result.status == "success" and result.history.succeeded == 2
+    assert result.shared_published
+    assert "Coverage shadow: category=insufficient_budget" in caplog.text
+    exit_code = 1 if result.status in {"failed", "partial"} else 0
+    assert exit_code == 0
+
+
+async def test_shadow_timeout_logs_category_and_keeps_status(
+    ingestion, monkeypatch, caplog,
+):
+    _, _, _, _, _, _, _, run = ingestion
+
+    async def timeout(*_args, **_kwargs):
+        raise TimeoutError("private database detail")
+
+    monkeypatch.setattr(ingest, "collect_history_coverage_shadow", timeout)
+    with caplog.at_level(logging.INFO, logger="fpl_optimizer.ingest"):
+        result = await run()
+    assert result.status == "success" and result.history.succeeded == 2
+    assert result.shared_published
+    assert "Coverage shadow: category=timeout" in caplog.text
+    assert "private database detail" not in caplog.text
+
+
+async def test_shadow_with_no_successful_players_returns_zero_counts(
+    ingestion, migrated_test_engine, publication_settings,
+):
+    factory, season, clock, _, _, _, _, _ = ingestion
+    await publish_catalog(migrated_test_engine, publication_settings, season)
+    counts = await shadow.collect_history_coverage_shadow(factory, season, now=clock.now())
+    assert counts == shadow.CoverageShadowCounts()
+    assert counts.log_line() == (
+        "Coverage shadow: players=0 provisional=0 unresolved_no_rows=0 "
+        "unresolved_club_change=0 players_with_gaps=0 missing_total=0 "
+        "within_grace_total=0 gaps_status_not_a=0"
+    )
