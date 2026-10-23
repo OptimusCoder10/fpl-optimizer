@@ -89,6 +89,11 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [x] Phase 2 Task 2.5c-3b: separate held-out loader and one-time runner built and synthetic-tested; no held-out run or real archive access.
 - [x] Phase 2 Task 2.5c-3b independent read-only review: no leak or fidelity deviation; synthetic guard and differential-test follow-up completed without production changes.
 - [x] Phase 2 Task 2.5c-3 joint held-out comparison: exact owner authorization, one guarded run, aggregate report, preserved lock and J39 result record.
+- [x] Phase 2 / J46 narrow sub-item: research-bundle contract and pure policy for future deadline selection, finalized pre-capture row filtering and unverified history-age labels; synthetic proof only.
+- [ ] Phase 2 / J46 Slice B: assemble the live repeatable-read view for the research bundle.
+- [ ] Phase 2 / J46 Slice C: assemble actual baseline predictor inputs and outputs.
+- [ ] Phase 2 / J46 Slice D: capture an immutable bundle with verified pre-deadline storage completion.
+- [ ] Phase 2 / §05B: verify player-specific coverage before claiming operational forecast eligibility; J44/J45 remain provisional/shadow only.
 - [ ] Phase 2 live pipeline: assemble player-specific required finalized fixtures and one repeatable-read view, call the J42 pure gate before assembling personal/current-position inputs, then adapt current rows and integrate prior selection with the predictor.
 - [ ] Phase 2: capture pre-deadline forecast bundles once the predictor exists
 - [ ] Phase 2 future slice: decide separately whether and how to enable benchmark-adopted opponent adjustment in the live predictor; the first release remains on the baseline.
@@ -143,6 +148,8 @@ Things the next session should know before touching this code.
 
 ## Tool Log
 Which tool did which piece of work — useful for knowing where to look first if something breaks.
+
+- **Tool: Codex — 2026-10-24 (J46 Slice A).** Added the pure research-bundle policy and 14 exact-name synthetic tests: future-deadline tie/order, strict cutoff and target-event row filters, finalization checks, zero minutes, deterministic results, and J42 transfers-mode age labels with `unverified_shadow_only` coverage. Five separate temporary production mutations failed their intended tests; `/tmp` backups were deleted after byte-for-byte restoration and an identical Git diff. Full Python 3.14.7 suite with the disposable local database and optional pinned archive unset: **699 passed, 1 skipped** (= 685 + 14); the database was stopped afterwards. Feature commit `046a747` is local. Private J46/§05D edits are local and ignored by Git; this HANDOFF commit alone records documentation progress. No live calls or push. Live view assembly (B), baseline assembly (C), storage-completion proof/capture (D), and verified §05B player coverage remain open. **No owner confirmation that `df43dbe` was pushed; treat its remote publication status as unverified.**
 
 - **Tool: Codex — 2026-10-24 (J45 test hardening).** Renamed only the shadow counter field/log key from `gaps_status_u` to `gaps_status_not_a`; it still counts players with gaps whose catalog status is not `a`. Added seven exact-name synthetic tests for low-budget skip, timeout category, four aware-time guards, positive IDs, equal-kickoff ID order and zero successful players. Eight temporary source mutations (budget, timeout handler, four separate aware-time calls, positive IDs and tie-break) each failed the named test; `/tmp` backups were deleted after byte-for-byte restoration and identical Git diffs. Full Python 3.14.7 suite with the optional pinned archive unset: **685 passed, 1 skipped** (= 678 + 7). The private J45/§05B key wording was updated locally and remains ignored by Git. No live calls or push; coverage-aware writer validation/retry and live J42 assembly remain open.
 
