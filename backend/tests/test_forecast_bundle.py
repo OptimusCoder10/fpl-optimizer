@@ -143,12 +143,31 @@ def test_bundle_availability_for_unowned_candidates():
         view = prepared()
         view = replace(view, players=tuple(replace(p, chance_of_playing_next_round=chance, status=status)
                                            if p.id in (1, 6) else p for p in view.players))
-        p = records(build(view).bundle)
+        saved = build(view).bundle
+        p = records(saved)
         for pid in (6, 1):
             if reason:
-                assert p[pid]["prediction"] is None, "unresolved availability must be excluded, including blanks"
+                if pid == 6:
+                    assert p[pid]["prediction"] is not None, "trusted blank must retain its prediction"
+                    assert p[pid]["prediction"]["status"] == "blank"
+                    assert p[pid]["prediction"]["event_mean"] == 0
+                    assert p[pid]["prediction"]["availability_factor"] is None
+                    assert p[pid]["prediction"]["appearance_probabilities"] is None
+                    _, inputs = inputs_for(view)
+                    item = next(item for item in inputs if item.player_id == pid)
+                    direct = predict(
+                        personal_rows=(), prior=item.prior, position=item.position,
+                        target_fixture_ids=(), catalog_trusted=True,
+                        chance=chance, status=status, owned=False,
+                        rules_version=view.rules_version, input_version=INPUT_VERSION,
+                        window_size=12, half_life=6, prior_strength=3,
+                    )
+                    assert p[pid]["prediction"] == json.loads(json.dumps(asdict(direct)))
+                else:
+                    assert p[pid]["prediction"] is None, "unresolved nonblank must have a null prediction"
                 assert p[pid]["exclusion_reasons"] == [reason]
                 assert p[pid]["warnings"] == ["availability_unresolved"]
+                assert {"player_id": pid, "reasons": [reason]} in saved["exclusions"]
             else:
                 assert p[pid]["prediction"]["availability_factor"] == factor
                 assert not p[pid]["prediction"]["availability_assumption"]

@@ -138,7 +138,9 @@ def assemble_research_bundle(
             if availability.factor is None:
                 reasons.append(availability.reason)
                 warnings.append("availability_unresolved")
-            else:
+            if availability.factor is not None or (
+                view.shared_freshness.status == "current" and not targets[player.team_id]
+            ):
                 output = predict(
                     personal_rows=window, prior=item.prior, position=player.position,
                     target_fixture_ids=targets[player.team_id],
@@ -147,7 +149,7 @@ def assemble_research_bundle(
                     rules_version=view.rules_version, input_version=input_version,
                     **BASELINE_PARAMETERS,
                 )
-                warnings.extend(output.warnings)
+                warnings.extend(warning for warning in output.warnings if warning not in warnings)
                 if output.status == "unavailable":
                     reasons.append(output.reason)
         if reasons:
