@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from typing import Generic, Literal, Protocol, TypeVar
 
 from fpl_optimizer.services.history_eligibility import (
-    HISTORY_AGE_LIMIT,
     HistoryEligibilityView,
     PlayerHistoryEvidence,
     decide_history_eligibility,
@@ -133,12 +132,6 @@ def label_player_history(
     separately removes target-event and later rows from predictor inputs.
     """
     cutoff = _aware(as_of, "as_of")
-    age_status: Literal["current", "stale", "unknown"] = "unknown"
-    if player.source_observed_at is not None and player.last_success_at is not None:
-        age_status = (
-            "stale" if cutoff - _aware(player.source_observed_at, "source_observed_at")
-            > HISTORY_AGE_LIMIT else "current"
-        )
     research_view = replace(view, players=(replace(player, required_fixtures=()),))
     decision = decide_history_eligibility(
         research_view,
@@ -149,6 +142,7 @@ def label_player_history(
         target_event=target_event_id,
     )
     candidate = decision.candidates[0]
+    age_status = candidate.history_age_status
     action: Literal["use", "exclude"] = (
         "use" if candidate.action == "use" and age_status == "current" else "exclude"
     )

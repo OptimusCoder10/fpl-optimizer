@@ -60,6 +60,8 @@ class CandidateDecision:
     may_use_prior: bool
     history_publication_version: int | None
     last_success_at: datetime | None
+    # Age alone, before recorded/required coverage changes the combined status.
+    history_age_status: Status = "unknown"
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,7 @@ def decide_history_eligibility(
         required = player_id in owned_player_ids or player_id in locked_player_ids
         age_limit = LINEUP_HISTORY_AGE_LIMIT if mode == "lineup" else HISTORY_AGE_LIMIT
         status: Status = "unknown"
+        age_status: Status = "unknown"
         reason = "no validated player history publication"
         warning = False
         usable: tuple[int, ...] = ()
@@ -163,6 +166,8 @@ def decide_history_eligibility(
                 status = "stale"
                 warning = True
                 reason = "player history within lineup allowance (warning)"
+
+            age_status = status
 
             # covered_fixture_ids can include provisional rows. Only the
             # checkpoint's finalized subset can become live prediction input.
@@ -209,7 +214,7 @@ def decide_history_eligibility(
             action = "BLOCK"
         results.append(CandidateDecision(
             player_id, status, reason, warning, action, usable, may_use_prior,
-            player.publication_version, player.last_success_at,
+            player.publication_version, player.last_success_at, age_status,
         ))
 
     return EligibilityDecision(
