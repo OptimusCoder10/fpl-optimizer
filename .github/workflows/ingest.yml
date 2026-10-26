@@ -5,6 +5,12 @@ on:
     # Offset from the hour to reduce contention with other scheduled workflows.
     - cron: "7,37 * * * *"
   workflow_dispatch:
+    inputs:
+      research_capture_self_test:
+        description: Run the synthetic research storage self-test after ingestion
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -18,7 +24,8 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 660 s ingestion budget + two 180 s capture operations + setup/cleanup room.
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: backend
@@ -48,6 +55,7 @@ jobs:
           printf '%s\n' "$DATABASE_SSL_CA_PEM" > "$DATABASE_SSL_CA_FILE"
 
       - name: Ingest shared data and resume history
+        id: ingest_data
         env:
           DATABASE_URL: ${{ secrets.SESSION_DATABASE_URL }}
           SESSION_DATABASE_URL: ${{ secrets.SESSION_DATABASE_URL }}
@@ -59,3 +67,32 @@ jobs:
           FPL_STORAGE_BUCKET: ${{ secrets.FPL_STORAGE_BUCKET }}
           FPL_STORAGE_ALLOWANCE_BYTES: ${{ vars.FPL_STORAGE_ALLOWANCE_BYTES }}
         run: .venv/bin/python -m fpl_optimizer.ingest
+
+      - name: Capture research bundle
+        if: ${{ always() && !cancelled() && (steps.ingest_data.outcome == 'success' || steps.ingest_data.outcome == 'failure') }}
+        timeout-minutes: 4
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.SESSION_DATABASE_URL }}
+          SESSION_DATABASE_URL: ${{ secrets.SESSION_DATABASE_URL }}
+          DATABASE_SSL_CA_FILE: ${{ runner.temp }}/fpl-database-ca.pem
+          FPL_SEASON_ID: ${{ vars.FPL_SEASON_ID }}
+          FPL_STORAGE_URL: ${{ secrets.FPL_STORAGE_URL }}
+          FPL_STORAGE_KEY: ${{ secrets.FPL_STORAGE_KEY }}
+          FPL_STORAGE_BUCKET: ${{ secrets.FPL_STORAGE_BUCKET }}
+          FPL_STORAGE_ALLOWANCE_BYTES: ${{ vars.FPL_STORAGE_ALLOWANCE_BYTES }}
+        run: .venv/bin/python -m fpl_optimizer.capture_research
+
+      - name: Self-test research storage
+        if: ${{ always() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.research_capture_self_test == true && (steps.ingest_data.outcome == 'success' || steps.ingest_data.outcome == 'failure') }}
+        timeout-minutes: 4
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.SESSION_DATABASE_URL }}
+          SESSION_DATABASE_URL: ${{ secrets.SESSION_DATABASE_URL }}
+          DATABASE_SSL_CA_FILE: ${{ runner.temp }}/fpl-database-ca.pem
+          FPL_STORAGE_URL: ${{ secrets.FPL_STORAGE_URL }}
+          FPL_STORAGE_KEY: ${{ secrets.FPL_STORAGE_KEY }}
+          FPL_STORAGE_BUCKET: ${{ secrets.FPL_STORAGE_BUCKET }}
+          FPL_STORAGE_ALLOWANCE_BYTES: ${{ vars.FPL_STORAGE_ALLOWANCE_BYTES }}
+        run: .venv/bin/python -m fpl_optimizer.capture_research --self-test
