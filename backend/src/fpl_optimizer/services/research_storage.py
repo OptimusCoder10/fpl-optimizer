@@ -29,6 +29,8 @@ class ObjectInfo:
     key: str
     size: int
     times: tuple[datetime, ...]
+    # Provider object creation, not HTTP Date or a last-access timestamp.
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -128,7 +130,7 @@ class ResearchStorage(SupabaseStorage):
                             if (key in found or type(size) is not int or size < 0
                                     or not row.get("created_at") or not times):
                                 raise ValueError
-                            found[key] = ObjectInfo(key, size, times)
+                            found[key] = ObjectInfo(key, size, times, timestamp(row["created_at"]))
                     offset += len(rows)
                 except (ValueError, KeyError, TypeError, AttributeError):
                     raise ArchiveError("listing_incomplete") from None

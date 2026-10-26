@@ -37,7 +37,7 @@ class Storage:
         self.hook('put', key)
         assert key not in self.data, 'immutable upload must not overwrite'
         self.data[key] = body
-        self.info[key] = ObjectInfo(key, len(body), (self.clock.now(),))
+        self.info[key] = ObjectInfo(key, len(body), (self.clock.now(),), self.clock.now())
         return self.response()
     async def get(self, key):
         self.calls.append(('get', key))
@@ -197,7 +197,7 @@ async def test_capture_incomplete_listing_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_capture_suppresses_only_qualified_slot_and_derives_latest():
+async def test_capture_suppresses_qualified_slot_and_derives_latest():
     result, store, timer = await run()
     second, _, _ = await run(store=store, timer=timer)
     assert second.status == 'skipped' and second.category == 'slot_exists' and len(store.data) == 3

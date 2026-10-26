@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import pickle
+import re
 import signal
 import sys
 import time
@@ -32,7 +33,7 @@ SAFE_CATEGORIES = {
     "ok", "self_test_ok", "no_target", "outside_window", "margin", "slot_exists",
     "already_running", "not_configured", "capacity", "listing_incomplete", "timestamp_invalid",
     "timestamp_missing", "clock_uncertain", "checksum", "invalid_evidence", "timeout",
-    "transport", "storage_response", "duplicate_key", "internal", "worker_failed",
+    "transport", "storage_response", "duplicate_key", "internal", "worker_failed", "slot_reserved",
 }
 
 
@@ -126,21 +127,54 @@ async def read(storage, key, clock):
     return response
 
 
-async def verified_records(storage, objects, prefix, deadline, clock):
-    """Derive qualified historical records; never re-date an old verification.
+def receipt_slot(key):
+    """Only the immutable, generated key can reserve an invalid receipt's slot."""
+    name = key.rsplit("/", 1)[-1]
+    if not re.fullmatch(r"\d{8}T\d{12}Z-[0-9a-f]{32}\.verified\.json", name):
+        raise ArchiveError("invalid_evidence")
+    try:
+        captured = datetime.strptime(name.split("-", 1)[0], "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise ArchiveError("invalid_evidence") from None
+    return int(captured.timestamp()) // 1800
 
-    Missing receipts are incomplete attempts. A corrupt receipt is not qualified;
-    a transport failure aborts discovery because slot membership is uncertain.
+
+def receipt_creation(info, runner_verified, clock):
+    """Creation must be explicit, aware and plausible within clock tolerance.
+
+    The existing server/runner tolerance is 120 seconds. It is not evidence of
+    provider persistence semantics; owner verification remains an activation gate.
+    """
+    if not isinstance(info.created_at, datetime):
+        raise ArchiveError("timestamp_missing")
+    created = aware(info.created_at)
+    if created < runner_verified - timedelta(seconds=120) or created > clock.now() + timedelta(seconds=120):
+        raise ArchiveError("clock_uncertain")
+    return created
+
+
+async def verified_records(storage, objects, prefix, deadline, clock):
+    """Use saved pair verification plus provider receipt creation as completion.
+
+    Caller supplies the complete inventory. Receipt GET is integrity-only: its
+    response Date never re-dates completion. Unknown timestamps/transport abort
+    discovery; invalid readable receipts remain reserved by their immutable keys.
     """
     qualified = []
     for key, info in sorted(objects.items()):
         if not key.startswith(prefix) or not key.endswith(".verified.json"):
             continue
+        key_slot = receipt_slot(key)
         raw = (await read(storage, key, clock)).content
+        if info.size != len(raw):
+            continue
         try:
             receipt = json.loads(raw)
             base = key.removesuffix(".verified.json")
             completed = timestamp(receipt["completion_at"])
+            if any(not isinstance(receipt[field], list) or not receipt[field]
+                   for field in ("sidecar_storage_times", "payload_storage_times")):
+                raise ArchiveError("invalid_evidence")
             observed = tuple(timestamp(t) for field in ("sidecar_storage_times", "payload_storage_times")
                              for t in receipt[field])
             runner_verified = timestamp(receipt["runner_verified_at"])
@@ -148,6 +182,7 @@ async def verified_records(storage, objects, prefix, deadline, clock):
                 continue
             if receipt["schema"] != "research-verification-v1" or receipt["deadline"] != deadline.isoformat():
                 continue
+            created = receipt_creation(info, runner_verified, clock)
             meta_key, payload_key = base + ".meta.json", base + ".json.gz"
             if meta_key not in objects or payload_key not in objects:
                 continue
@@ -161,11 +196,16 @@ async def verified_records(storage, objects, prefix, deadline, clock):
                 continue
             captured = timestamp(meta["capture_time"])
             slot = int(captured.timestamp()) // 1800
+            completed = max(completed, created)
             if (meta["schema"] != "research-capture-v1" or meta["prospective"] is not True
                     or meta["deadline"] != deadline.isoformat() or receipt["slot"] != slot
+                    or meta["slot"] != slot or key_slot != slot
+                    or meta["season_id"] != receipt["season_id"]
+                    or meta["target_event"] != receipt["target_event"]
+                    or not key.startswith(f'{PROTECTED}{meta["season_id"]}/{meta["target_event"]}/')
                     or not timedelta(0) < deadline - captured <= WINDOW
                     or completed < captured
-                    or max(completed, *info.times, *objects[meta_key].times,
+                    or max(completed, *objects[meta_key].times,
                            *objects[payload_key].times) + MARGIN >= deadline):
                 continue
             qualified.append((completed, key, slot))
@@ -198,9 +238,13 @@ async def capture(view, storage, *, allowance, clock, attempt, build=build_in_pr
     objects = await inventory(storage, clock)
     slot = int(captured.timestamp()) // 1800
     if not self_test:
+        reserved = {receipt_slot(key) for key in objects
+                    if key.startswith(prefix) and key.endswith(".verified.json")}
         records = await verified_records(storage, objects, prefix, deadline, clock)
         if any(record[2] == slot for record in records):
             return CaptureResult("skipped", "slot_exists")
+        if slot in reserved:
+            return CaptureResult("skipped", "slot_reserved")
         canonical, compressed = await build(view)
     else:
         canonical = encoded({"schema": "research-storage-self-test-v1", "synthetic": True})
@@ -212,6 +256,8 @@ async def capture(view, storage, *, allowance, clock, attempt, build=build_in_pr
         "sha256_canonical": digest(canonical), "sha256_gzip": digest(compressed),
         "canonical_bytes": len(canonical), "gzip_bytes": len(compressed), "slot": slot,
         "versions": document.get("versions", {}) if not self_test else {},
+        "season_id": view.season_id if not self_test else None,
+        "target_event": target.id if not self_test else None,
     }
     metadata = encoded(meta)
     used = sum(item.size for item in objects.values())
@@ -245,6 +291,7 @@ async def capture(view, storage, *, allowance, clock, attempt, build=build_in_pr
     receipt = encoded({
         "schema": "research-verification-v1", "completion_at": completed.isoformat(),
         "deadline": deadline.isoformat() if deadline else None, "slot": slot,
+        "season_id": meta["season_id"], "target_event": meta["target_event"],
         "sha256_metadata": digest(metadata), "sha256_gzip": meta["sha256_gzip"],
         "runner_verified_at": runner_verified.isoformat(),
         "sidecar_storage_times": [value.isoformat() for value in sidecar_times],
@@ -260,7 +307,16 @@ async def capture(view, storage, *, allowance, clock, attempt, build=build_in_pr
     receipt_read = await read(storage, base + ".verified.json", clock)
     if receipt_read.content != receipt:
         raise ArchiveError("checksum")
-    persisted = max(clock.now(), *receipt_write.times, *receipt_read.times)
+    # A receipt must itself appear in the complete, stable listing. The receipt
+    # contains pair completion; its own creation is an independent provider fact.
+    objects = await inventory(storage, clock)
+    receipt_info = objects.get(base + ".verified.json")
+    if receipt_info is None or receipt_info.size != len(receipt):
+        raise ArchiveError("listing_incomplete")
+    completed = max(completed, receipt_creation(receipt_info, runner_verified, clock))
+    if not receipt_write.times or not receipt_read.times:
+        raise ArchiveError("timestamp_missing")
+    persisted = max(completed, clock.now(), *(aware(t) for t in receipt_write.times + receipt_read.times))
     if not self_test and persisted + MARGIN >= deadline:
         return CaptureResult("unqualified", "margin", completed)
     return CaptureResult("captured", "self_test_ok" if self_test else "ok", completed,

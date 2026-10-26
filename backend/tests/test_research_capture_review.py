@@ -21,9 +21,8 @@ async def records(store, timer, view):
                                       view.target.deadline_time, timer.clock)
 
 
-@pytest.mark.xfail(strict=True, reason="Finding 1: completion-attestation protocol awaits owner decision")
 @pytest.mark.asyncio
-async def test_receipt_readback_crossing_margin_never_qualifies_later():
+async def test_receipt_late_readback_is_live_unqualified_but_historically_qualified():
     timer = Time(); store = Storage(timer.clock)
     view = at_deadline(timedelta(minutes=20))
     def delayed(action, key):
@@ -31,28 +30,26 @@ async def test_receipt_readback_crossing_margin_never_qualifies_later():
             timer.advance(600)
     store.hook = delayed
     result, _, _ = await run(view, store=store, timer=timer)
-    assert result.status == 'unqualified'
+    assert result.status == 'unqualified', 'live receipt failure must remain unqualified'
     store.hook = lambda *args: None
-    assert not await records(store, timer, view), 'late receipt read-back must never qualify later'
+    assert await records(store, timer, view), 'late receipt GET must not re-date historical completion'
 
 
-@pytest.mark.xfail(strict=True, reason="Finding 1: completion-attestation protocol awaits owner decision")
 @pytest.mark.asyncio
-async def test_interrupted_receipt_readback_never_qualifies_later():
+async def test_receipt_interrupted_readback_is_live_unqualified_but_historically_qualified():
     timer = Time(); store = Storage(timer.clock); view = prepared()
     def interrupted(action, key):
         if action == 'get' and key.endswith('.verified.json'):
             raise ArchiveError('transport')
     store.hook = interrupted
     result, _, _ = await run(view, store=store, timer=timer)
-    assert result.status == 'unqualified'
+    assert result.status == 'unqualified', 'live receipt failure must remain unqualified'
     store.hook = lambda *args: None
-    assert not await records(store, timer, view), 'interrupted receipt read-back must not qualify'
+    assert await records(store, timer, view), 'interrupted receipt GET does not disprove timely creation'
 
 
-@pytest.mark.xfail(strict=True, reason="Finding 1: completion-attestation protocol awaits owner decision")
 @pytest.mark.asyncio
-async def test_receipt_response_timestamp_crossing_margin_never_qualifies_later():
+async def test_receipt_late_response_is_live_unqualified_but_historically_qualified():
     timer = Time()
     class LateReceipt(Storage):
         async def put(self, key, body, content_type):
@@ -62,8 +59,8 @@ async def test_receipt_response_timestamp_crossing_margin_never_qualifies_later(
             return result
     store = LateReceipt(timer.clock); view = at_deadline(timedelta(minutes=20))
     result, _, _ = await run(view, store=store, timer=timer)
-    assert result.status == 'unqualified'
-    assert not await records(store, timer, view), 'late receipt response evidence must survive discovery'
+    assert result.status == 'unqualified', 'live receipt failure must remain unqualified'
+    assert await records(store, timer, view), 'live response margin must not replace provider creation time'
 
 
 @pytest.mark.asyncio
