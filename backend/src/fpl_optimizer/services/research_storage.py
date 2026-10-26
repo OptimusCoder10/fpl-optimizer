@@ -7,6 +7,8 @@ No delete or overwrite operation is exposed by the capture service.
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import hashlib
+import json
 
 from fpl_optimizer.services.shared_archive import ArchiveError, SupabaseStorage
 
@@ -31,6 +33,8 @@ class ObjectInfo:
     times: tuple[datetime, ...]
     # Provider object creation, not HTTP Date or a last-access timestamp.
     created_at: datetime | None = None
+    # Detect changing receipt metadata across scans even if its times are invalid.
+    metadata_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,11 @@ class StoredResponse:
     content: bytes
     times: tuple[datetime, ...]
     server_date: datetime
+    object_times: tuple[datetime, ...] = ()
+
+
+def is_research_receipt(key):
+    return key.startswith("research-bundles/") and key.endswith(".verified.json")
 
 
 def _body_times(value) -> tuple[datetime, ...]:
@@ -82,14 +91,15 @@ class ResearchStorage(SupabaseStorage):
             raise ArchiveError("storage_response") from None
         if not isinstance(body, dict):
             raise ArchiveError("storage_response")
-        return StoredResponse(b"", times + _body_times(body), date)
+        body_times = _body_times(body)
+        return StoredResponse(b"", times + body_times, date, times[1:] + body_times)
 
     async def get(self, key):
         response, date, times = await self._observed(
             "GET", f"/object/authenticated/{self._bucket}/{key}",
             headers={"cache-control": "no-cache, no-store"},
         )
-        return StoredResponse(response.content, times, date)
+        return StoredResponse(response.content, times, date, times[1:])
 
     async def _scan(self):
         found = {}
@@ -126,11 +136,23 @@ class ResearchStorage(SupabaseStorage):
                             folders.append(key)
                         else:
                             size = row["metadata"]["size"]
-                            times = _body_times(row)
+                            receipt = is_research_receipt(key)
                             if (key in found or type(size) is not int or size < 0
-                                    or not row.get("created_at") or not times):
+                                    or (not row.get("created_at") and not receipt)):
                                 raise ValueError
-                            found[key] = ObjectInfo(key, size, times, timestamp(row["created_at"]))
+                            fingerprint = hashlib.sha256(json.dumps(
+                                row, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                            ).encode()).hexdigest() if receipt else None
+                            try:
+                                times = _body_times(row)
+                                created = timestamp(row.get("created_at"))
+                            except ArchiveError:
+                                if not receipt:
+                                    raise
+                                # The key and size remain trustworthy listing facts;
+                                # invalid time evidence disqualifies only this receipt.
+                                times, created = (), None
+                            found[key] = ObjectInfo(key, size, times, created, fingerprint)
                     offset += len(rows)
                 except (ValueError, KeyError, TypeError, AttributeError):
                     raise ArchiveError("listing_incomplete") from None

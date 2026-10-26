@@ -64,7 +64,7 @@ async def test_receipt_late_response_is_live_unqualified_but_historically_qualif
 
 
 @pytest.mark.asyncio
-async def test_discovery_read_failure_aborts_slot_retry():
+async def test_capture_reserves_slot_without_reading_unreadable_history():
     result, store, timer = await run()
     assert result.status == 'captured'
     old_keys = set(store.data)
@@ -73,8 +73,11 @@ async def test_discovery_read_failure_aborts_slot_retry():
             raise ArchiveError('transport')
     store.hook = fail
     result, _, _ = await run(store=store, timer=timer)
-    assert result.status == 'missed', 'uncertain discovery must abort rather than duplicate a slot'
-    assert result.category == 'transport' and set(store.data) == old_keys
+    assert result.status == 'skipped' and result.category == 'slot_reserved'
+    assert set(store.data) == old_keys, 'unreadable receipt slot must not be duplicated'
+    with pytest.raises(ArchiveError, match='transport'):
+        await cap.derive_prospective_record(store, prefix=cap.PROTECTED,
+            deadline=prepared().target.deadline_time, clock=timer.clock)
 
 
 @pytest.mark.asyncio
@@ -213,4 +216,4 @@ async def test_payload_response_time_is_preserved_in_historical_completion():
     historical = await records(store, timer, prepared())
     assert historical and historical[0][0] == observed, 'persisted payload observations must determine completion'
     again, _, _ = await run(store=store, timer=timer)
-    assert again.category == 'slot_exists'
+    assert again.category == 'slot_reserved'

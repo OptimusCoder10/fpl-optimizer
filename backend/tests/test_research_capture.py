@@ -150,7 +150,7 @@ async def test_capture_later_storage_timestamp_controls_completion():
     result, _, _ = await run(store=store, timer=timer)
     assert result.status == 'captured' and result.completion == AS_OF + timedelta(minutes=11)
     result, _, _ = await run(store=store, timer=timer)
-    assert result.category == 'slot_exists', 'stored completion upper bound must not allow duplicate slots'
+    assert result.category == 'slot_reserved', 'stored completion upper bound must not allow duplicate slots'
 
 
 @pytest.mark.asyncio
@@ -200,7 +200,7 @@ async def test_capture_incomplete_listing_fails_closed():
 async def test_capture_suppresses_qualified_slot_and_derives_latest():
     result, store, timer = await run()
     second, _, _ = await run(store=store, timer=timer)
-    assert second.status == 'skipped' and second.category == 'slot_exists' and len(store.data) == 3
+    assert second.status == 'skipped' and second.category == 'slot_reserved' and len(store.data) == 3
     timer.advance(1800)
     view = replace(prepared(), as_of=timer.clock.now())
     third, _, _ = await run(view, store=store, timer=timer)

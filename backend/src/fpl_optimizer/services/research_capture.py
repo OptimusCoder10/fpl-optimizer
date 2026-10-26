@@ -19,7 +19,7 @@ import sys
 import time
 from uuid import uuid4
 
-from fpl_optimizer.services.research_storage import aware, timestamp
+from fpl_optimizer.services.research_storage import aware, is_research_receipt, timestamp
 from fpl_optimizer.services.shared_archive import ArchiveError
 
 BUDGET_SECONDS = 180
@@ -28,6 +28,7 @@ WINDOW = timedelta(hours=24)
 PROTECTED = "research-bundles/deadline-window/"
 SELF_TEST = "research-bundles/self-test/"
 RECEIPT_RESERVE = 4096
+RECEIPT_TIME_TOLERANCE = timedelta(seconds=2)
 INPUT_VERSION = "research-inputs-j47-v1"
 SAFE_CATEGORIES = {
     "ok", "self_test_ok", "no_target", "outside_window", "margin", "slot_exists",
@@ -116,7 +117,8 @@ async def inventory(storage, clock):
         raise ArchiveError("clock_uncertain")
     if len({item.key for item in objects}) != len(objects):
         raise ArchiveError("listing_incomplete")
-    if any(type(item.size) is not int or item.size < 0 or not item.times for item in objects):
+    if any(type(item.size) is not int or item.size < 0
+           or (not item.times and not is_research_receipt(item.key)) for item in objects):
         raise ArchiveError("listing_incomplete")
     return {item.key: item for item in objects}
 
@@ -139,7 +141,7 @@ def receipt_slot(key):
     return int(captured.timestamp()) // 1800
 
 
-def receipt_creation(info, runner_verified, clock):
+def receipt_creation(info, runner_verified, now, object_times=()):
     """Creation must be explicit, aware and plausible within clock tolerance.
 
     The existing server/runner tolerance is 120 seconds. It is not evidence of
@@ -148,8 +150,15 @@ def receipt_creation(info, runner_verified, clock):
     if not isinstance(info.created_at, datetime):
         raise ArchiveError("timestamp_missing")
     created = aware(info.created_at)
-    if created < runner_verified - timedelta(seconds=120) or created > clock.now() + timedelta(seconds=120):
+    if created < runner_verified - timedelta(seconds=120) or created > now + timedelta(seconds=120):
         raise ArchiveError("clock_uncertain")
+    if not info.times:
+        raise ArchiveError("timestamp_missing")
+    if any(not isinstance(value, datetime) for value in info.times + object_times):
+        raise ArchiveError("timestamp_invalid")
+    # Object metadata (including Last-Modified), never a later HTTP Date.
+    if any(aware(value) > created + RECEIPT_TIME_TOLERANCE for value in info.times + object_times):
+        raise ArchiveError("invalid_evidence")
     return created
 
 
@@ -157,17 +166,20 @@ async def verified_records(storage, objects, prefix, deadline, clock):
     """Use saved pair verification plus provider receipt creation as completion.
 
     Caller supplies the complete inventory. Receipt GET is integrity-only: its
-    response Date never re-dates completion. Unknown timestamps/transport abort
-    discovery; invalid readable receipts remain reserved by their immutable keys.
+    response Date never re-dates completion. Receipt-local evidence errors skip
+    only that receipt. All reads stay outside those handlers: a read failure must
+    abort derivation, never silently promote an older record.
     """
     qualified = []
     for key, info in sorted(objects.items()):
         if not key.startswith(prefix) or not key.endswith(".verified.json"):
             continue
         key_slot = receipt_slot(key)
-        raw = (await read(storage, key, clock)).content
+        receipt_response = await read(storage, key, clock)
+        raw = receipt_response.content
         if info.size != len(raw):
             continue
+        now = clock.now()
         try:
             receipt = json.loads(raw)
             base = key.removesuffix(".verified.json")
@@ -182,12 +194,15 @@ async def verified_records(storage, objects, prefix, deadline, clock):
                 continue
             if receipt["schema"] != "research-verification-v1" or receipt["deadline"] != deadline.isoformat():
                 continue
-            created = receipt_creation(info, runner_verified, clock)
+            created = receipt_creation(info, runner_verified, now, receipt_response.object_times)
             meta_key, payload_key = base + ".meta.json", base + ".json.gz"
             if meta_key not in objects or payload_key not in objects:
                 continue
-            meta_raw = (await read(storage, meta_key, clock)).content
-            compressed = (await read(storage, payload_key, clock)).content
+        except (ValueError, KeyError, TypeError, OSError, EOFError, ArchiveError):
+            continue
+        meta_raw = (await read(storage, meta_key, clock)).content
+        compressed = (await read(storage, payload_key, clock)).content
+        try:
             meta = json.loads(meta_raw)
             if (digest(meta_raw) != receipt["sha256_metadata"]
                     or digest(compressed) != receipt["sha256_gzip"]
@@ -209,13 +224,24 @@ async def verified_records(storage, objects, prefix, deadline, clock):
                            *objects[payload_key].times) + MARGIN >= deadline):
                 continue
             qualified.append((completed, key, slot))
-        except (ValueError, KeyError, TypeError, OSError, EOFError):
+        except (ValueError, KeyError, TypeError, OSError, EOFError, ArchiveError):
             continue
     return tuple(qualified)
 
 
 def prospective_record(records):
     return max(records, key=lambda record: (record[0], record[1]), default=None)
+
+
+async def derive_prospective_record(storage, *, prefix, deadline, clock):
+    """Explicit read-only historical verification, never called by capture().
+
+    A complete inventory is required. Read/transport failures propagate without
+    returning any older candidate. No object is created or changed here.
+    """
+    objects = await inventory(storage, clock)
+    records = await verified_records(storage, objects, prefix, deadline, clock)
+    return prospective_record(records)
 
 
 async def capture(view, storage, *, allowance, clock, attempt, build=build_in_process,
@@ -240,9 +266,6 @@ async def capture(view, storage, *, allowance, clock, attempt, build=build_in_pr
     if not self_test:
         reserved = {receipt_slot(key) for key in objects
                     if key.startswith(prefix) and key.endswith(".verified.json")}
-        records = await verified_records(storage, objects, prefix, deadline, clock)
-        if any(record[2] == slot for record in records):
-            return CaptureResult("skipped", "slot_exists")
         if slot in reserved:
             return CaptureResult("skipped", "slot_reserved")
         canonical, compressed = await build(view)
@@ -313,7 +336,9 @@ async def capture(view, storage, *, allowance, clock, attempt, build=build_in_pr
     receipt_info = objects.get(base + ".verified.json")
     if receipt_info is None or receipt_info.size != len(receipt):
         raise ArchiveError("listing_incomplete")
-    completed = max(completed, receipt_creation(receipt_info, runner_verified, clock))
+    completed = max(completed, receipt_creation(
+        receipt_info, runner_verified, clock.now(), receipt_write.object_times + receipt_read.object_times,
+    ))
     if not receipt_write.times or not receipt_read.times:
         raise ArchiveError("timestamp_missing")
     persisted = max(completed, clock.now(), *(aware(t) for t in receipt_write.times + receipt_read.times))

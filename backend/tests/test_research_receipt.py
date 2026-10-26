@@ -56,11 +56,10 @@ async def test_receipt_missing_or_odd_created_at_fails_closed_and_blocks_retry()
         store = OddCreation(timer.clock)
         result, _, _ = await run(store=store, timer=timer)
         assert result.status == 'unqualified', 'missing or odd receipt creation must fail live qualification'
-        with pytest.raises(ArchiveError):
-            await records(store, timer, prepared())
+        assert not await records(store, timer, prepared())
         before = tuple(store.data)
         retry, _, _ = await run(store=store, timer=timer)
-        assert retry.status == 'missed' and tuple(store.data) == before, 'uncertain receipt must block retry'
+        assert retry.category == 'slot_reserved' and tuple(store.data) == before, 'uncertain receipt must reserve its slot'
 
 
 @pytest.mark.asyncio
