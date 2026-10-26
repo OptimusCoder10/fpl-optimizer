@@ -11,7 +11,9 @@ from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
 import json
+import os
 import pickle
+import signal
 import sys
 import time
 from uuid import uuid4
@@ -85,6 +87,7 @@ async def build_in_process(view):
         sys.executable, "-m", "fpl_optimizer.services.research_capture_worker",
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
         # No database/storage credentials or project settings are inherited.
         env={"PATH": "/usr/bin:/bin"},
     )
@@ -95,9 +98,12 @@ async def build_in_process(view):
         # Output is from our own child, never from storage or HTTP.
         return pickle.loads(output)
     finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
+        # Kill descendants as well, including when the immediate worker exited.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.wait()
 
 
 async def inventory(storage, clock):
@@ -135,7 +141,8 @@ async def verified_records(storage, objects, prefix, deadline, clock):
             receipt = json.loads(raw)
             base = key.removesuffix(".verified.json")
             completed = timestamp(receipt["completion_at"])
-            observed = tuple(timestamp(t) for t in receipt["sidecar_storage_times"])
+            observed = tuple(timestamp(t) for field in ("sidecar_storage_times", "payload_storage_times")
+                             for t in receipt[field])
             runner_verified = timestamp(receipt["runner_verified_at"])
             if not observed or completed != max(runner_verified, *observed):
                 continue
@@ -158,10 +165,11 @@ async def verified_records(storage, objects, prefix, deadline, clock):
                     or meta["deadline"] != deadline.isoformat() or receipt["slot"] != slot
                     or not timedelta(0) < deadline - captured <= WINDOW
                     or completed < captured
-                    or max(completed, *info.times, *objects[meta_key].times) + MARGIN >= deadline):
+                    or max(completed, *info.times, *objects[meta_key].times,
+                           *objects[payload_key].times) + MARGIN >= deadline):
                 continue
             qualified.append((completed, key, slot))
-        except (ValueError, KeyError, TypeError, OSError, EOFError, ArchiveError):
+        except (ValueError, KeyError, TypeError, OSError, EOFError):
             continue
     return tuple(qualified)
 
@@ -213,7 +221,8 @@ async def capture(view, storage, *, allowance, clock, attempt, build=build_in_pr
         return CaptureResult("skipped", "margin")
     base = prefix + captured.strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex
     attempt.started_upload = True
-    clock.observe(await storage.put(base + ".json.gz", compressed, "application/gzip"))
+    payload_write = await storage.put(base + ".json.gz", compressed, "application/gzip")
+    clock.observe(payload_write)
     sidecar_write = await storage.put(base + ".meta.json", metadata, "application/json")
     clock.observe(sidecar_write)
     payload_read = await read(storage, base + ".json.gz", clock)
@@ -229,7 +238,8 @@ async def capture(view, storage, *, allowance, clock, attempt, build=build_in_pr
         raise ArchiveError("listing_incomplete")
     runner_verified = clock.now()
     sidecar_times = sidecar_write.times + sidecar_read.times + sidecar.times
-    completed = max(runner_verified, *sidecar_times)
+    payload_times = payload_write.times + payload_read.times + payload.times
+    completed = max(runner_verified, *sidecar_times, *payload_times)
     if not self_test and completed + MARGIN >= deadline:
         return CaptureResult("unqualified", "margin", completed)
     receipt = encoded({
@@ -238,6 +248,7 @@ async def capture(view, storage, *, allowance, clock, attempt, build=build_in_pr
         "sha256_metadata": digest(metadata), "sha256_gzip": meta["sha256_gzip"],
         "runner_verified_at": runner_verified.isoformat(),
         "sidecar_storage_times": [value.isoformat() for value in sidecar_times],
+        "payload_storage_times": [value.isoformat() for value in payload_times],
         "upload_server_date": sidecar_write.server_date.isoformat(),
         "readback_server_date": sidecar_read.server_date.isoformat(),
         "listing_timestamps": [value.isoformat() for value in sidecar.times],
