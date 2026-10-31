@@ -106,11 +106,11 @@ def test_rescheduled_fixture_moved_into_target_event_excluded():
     assert eligible((Row(102, 90),), (fixture(102, 9),), (gw(8), gw(9))) == ()
 
 
-def test_unfinished_or_unchecked_or_provisional_rows_excluded():
+def test_finished_checked_rows_ignore_provisional_flag():
     rows = tuple(Row(i, 90) for i in (101, 102, 103, 104))
     fixtures = (fixture(101), fixture(102, finished=False),
                 fixture(103, provisional=True), fixture(104, event=7))
-    assert eligible(rows, fixtures, (gw(8), gw(7, checked=False))) == (Row(101, 90),)
+    assert eligible(rows, fixtures, (gw(8), gw(7, checked=False))) == (Row(101, 90), Row(103, 90))
 
 
 def test_zero_minute_rows_retained_and_order_is_kickoff_then_fixture_id():

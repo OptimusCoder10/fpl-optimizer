@@ -91,9 +91,11 @@ def eligible_current_rows(
     target_event_id: int,
     as_of: datetime,
 ) -> EligibleCurrentRows[RowT]:
-    """Filter using Fixture.finished/finished_provisional/gameweek_id/kickoff_time
-    and Gameweek.data_checked. Fixture assignments are authoritative, including
-    a reschedule into the target event. Zero-minute stored rows remain eligible.
+    """Require finished fixtures and finalized (data_checked) gameweeks.
+
+    finished_provisional can remain true after completion and is not a veto.
+    Fixture assignments are authoritative, including a reschedule into the
+    target event. Zero-minute stored rows remain eligible.
     """
     cutoff = _aware(as_of, "as_of")
     if target_event_id < 1:
@@ -109,7 +111,7 @@ def eligible_current_rows(
             continue
         gameweek = by_gameweek.get(fixture.gameweek_id)
         if (gameweek is None or not gameweek.data_checked or not fixture.finished
-                or fixture.finished_provisional or fixture.kickoff_time is None):
+                or fixture.kickoff_time is None):
             continue
         kickoff = _aware(fixture.kickoff_time, "kickoff_time")
         if kickoff < cutoff:

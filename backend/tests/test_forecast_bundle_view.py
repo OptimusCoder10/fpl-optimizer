@@ -353,7 +353,7 @@ async def test_view_output_feeds_policy_functions(bundle_db):
     filtered = eligible_current_rows(
         view.history_rows, view.fixtures, view.gameweeks, target_event_id=target.id, as_of=view.as_of,
     )
-    assert tuple(row.fixture_id for row in filtered.rows) == (11,)
+    assert tuple(row.fixture_id for row in filtered.rows) == (11, 15)
     assert filtered.rows[0].minutes == 0
     for row in filtered.rows:
         fixture = next(f for f in view.fixtures if f.id == row.fixture_id)
@@ -369,3 +369,36 @@ async def test_view_output_feeds_policy_functions(bundle_db):
     assert labels[1].action == "exclude" and "91, 92" in labels[1].reason
     assert all(label.coverage_status == "unverified_shadow_only" for label in labels)
     assert all(labels[i].action == "exclude" for i in (2, 4))
+
+
+async def test_production_finished_flags_retain_history_and_predictions(bundle_db):
+    """Completed API fixtures keep both flags true; exercise the real DB view chain."""
+    from fpl_optimizer.services.forecast_bundle import assemble_research_bundle
+    from fpl_optimizer.services.forecast_bundle_inputs import assemble_player_inputs
+
+    factory, season, _ = bundle_db
+    async with factory.begin() as session:
+        await session.execute(update(Fixture).where(
+            Fixture.season_id == season, Fixture.finished.is_(True),
+        ).values(finished_provisional=True))
+        await session.execute(update(Player).where(
+            Player.season_id == season, Player.id == 1,
+        ).values(status="a", chance_of_playing_next_round=None))
+    view = await reader.read_bundle_view(factory, season, as_of=AS_OF)
+    history = HistoryEligibilityView(
+        view.shared_freshness, view.player_history, view.history_publication_version,
+        view.shared_publication.publication_version,
+    )
+    labels = {p.player_id: label_player_history(
+        history, p, target_event_id=view.target.id, as_of=view.as_of,
+    ) for p in view.player_history}
+    assert labels[1].action == "use" and labels[1].history_age_status == "current"
+    inputs = assemble_player_inputs(view, labels)
+    player_input = next(item for item in inputs if item.player_id == 1)
+    assert player_input.target_fixture_ids
+    assert tuple(row.fixture_id for row in player_input.personal_rows) == (11, 15)
+    saved = assemble_research_bundle(view, labels, inputs, input_version="regression-v1").bundle
+    player = next(item for item in saved["players"] if item["player_id"] == 1)
+    assert player["prediction"]["status"] == "available"
+    assert player["exclusion_reasons"] == []
+    assert {tuple(row["key"]) for row in saved["evidence"]["rows"]} == {(1, 11), (1, 15)}

@@ -40,11 +40,11 @@ def sample():
                player(4, 2, 2), player(5, 3, 1), player(6, 4, 3))
     fixtures = tuple(BundleFixture(fid, gw, AS_OF + timedelta(hours=hours), finished, provisional, 1, 2)
                      for fid, gw, hours, finished, provisional in (
-                         (1, 1, -72, True, False), (2, 1, -48, True, False),
-                         (3, 2, -24, True, False), (4, 1, 1, True, False),
+                         (1, 1, -72, True, True), (2, 1, -48, True, True),
+                         (3, 2, -24, True, True), (4, 1, 1, True, False),
                          (20, 4, -24, True, False), (21, 4, 48, False, False),
                          (6, 5, -24, True, False), (7, 1, -24, False, False),
-                         (8, 1, -24, True, True), (9, 3, -24, True, False),
+                         (8, 1, -24, False, True), (9, 3, -24, True, False),
                      )) + (BundleFixture(10, None, None, True, False, 1, 2),)
     history = (row(1, 1, minutes=90, goals=10), row(2, 2), row(2, 3, minutes=60, goals=2),
                row(3, 1, goals=1000), row(4, 2, goals=2000), row(5, 2, minutes=90, goals=5))
