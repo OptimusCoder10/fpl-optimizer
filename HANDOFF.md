@@ -2,13 +2,17 @@
 
 This file tracks live build progress — what's actually done, not just what's planned. Read this before starting any task; update it before finishing one.
 
-## Current State — 2026-10-31
+## Current State — 31 Oct 2026
+
+Local commits through `e42342f`; latest full Python 3.14.7 suite: **800 passed, 1 skipped**.
 
 Phase 1 data services through the scoped slice 1.6 and Task 4a HTTP/manual ingestion are implemented with synthetic HTTP tests; broader history eligibility, live-FPL probes and real-manager validation remain open. Task 4b's scheduled/manual Actions ingestion has published shared data and resumed history across separate runner executions. Hosted Supabase migrations and rollback-only publication passed. Render's Singapore free instance built on Python 3.14.7, passed the serial CBC proof and returned 200 from both health routes with verified-TLS database readiness. Cold/warm health timings are recorded below. Actual frontend CORS and threaded CBC on Render remain unverified.
 
-Phase 2 Tasks 2.1–2.4 have pure prediction components and the frozen baseline. The GW1–19 development grid kept 12/6/3; J35's opponent candidate (L=12, λ=12) passed the one authorized GW20–38 benchmark comparison, but the first release stays on the baseline. J46–J48 now assemble a current-season research bundle with unverified history coverage. J49 Slice D1 implements bounded capture and provider-backed receipt qualification in local commits `4c374a9`, `a282562` and `2be9133`, with later review fixes in `0eae766`. D2 wires capture after scheduled ingestion, with a manual-only storage self-test. Owner provider verification and the checks below remain open; no prospective capture or operational coverage has been verified on live inputs. Live input integration and any live opponent adjustment remain open.
+Phase 2 Tasks 2.1–2.4 have pure prediction components and the frozen baseline. The GW1–19 development grid kept 12/6/3; J35's opponent candidate (L=12, λ=12) passed the one authorized GW20–38 benchmark comparison, but the first release stays on the baseline. J46–J48 now assemble a current-season research bundle with unverified history coverage. J49 Slice D1 implements bounded capture and provider-backed receipt qualification in local commits `4c374a9`, `a282562` and `2be9133`, with later review fixes in `0eae766`. D2 wires capture after scheduled ingestion, with a manual-only storage self-test. Scheduled capture has run, but owner provider verification and the checks below remain open; no valid prospective prediction evidence or operational coverage has been verified on live inputs. Live input integration and any live opponent adjustment remain open.
 
 J50 corrects a confirmed research-row eligibility bug: completed fixtures can retain `finished_provisional=true`, so research now uses `finished` and gameweek `data_checked` while preserving event and kickoff cutoffs. A local read-only production diagnostic confirmed the cause before implementation; observed aggregates remain in private notes. Stored captures are unchanged; Slice D and operational coverage gates remain open.
+
+GW9 scheduled capture machinery worked, but all four bundles reported `players=669 excluded=669` and are **not valid prospective prediction evidence**. The `finished_provisional` veto caused the exclusions; J50 fixed it in `e42342f`. Proof is pending from the first GW10 capture after its window opens **6 November 2026 at 00:00 IST**: `excluded` must be far below 669, with a reason breakdown. The GW9 bundles remain unchanged.
 
 ## Current Phase
 Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record is `docs/spec/AMENDMENTS.md`; §§01–12 define the contract. Slices 1.1–1.3, the owner-scoped portion of 1.4, 1.5 and the synthetic-only 1.6 service are implemented. The hosted database, migration and rollback-only publication proof passed, as did Render's Python/serial-CBC/TLS-health proof. Task 4a now wires HTTP/manual ingestion to those existing services. The checklist distinguishes remaining live-FPL/real-manager validation, history eligibility, CORS, Actions and threaded-CBC work.
@@ -107,7 +111,7 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
     - [x] Confirm self-test objects stay under `research-bundles/self-test/` and are never treated as prospective; no research deadline-window object appeared.
     - [ ] Optionally record observed timestamp and clock-skew behavior privately; no values belong in tracked files.
     - [x] Confirm `FPL_STORAGE_ALLOWANCE_BYTES` has room for up to 48 captures of about 250 KB gz (about 12 MB), plus other bucket objects and metadata; the current roughly 4.7 MB bucket total and configured allowance leave that headroom.
-    - [ ] Confirm the first in-window scheduled run logs a safe `captured`/`skipped`/`missed`/`unqualified` status, and identify the last viable GW9 wake before 16:20 IST. This needs the first in-window scheduled run.
+    - [x] Confirm the first in-window scheduled run logs a safe status. Runs #89–#92 logged `status=captured category=ok`, completed in 75–80 s of the 180 s operation budget, with 14k–65k s deadline margins; later runs logged `skipped/outside_window`. The GW9 bundles are invalid as prospective prediction evidence because all four excluded all 669 players; see Current State.
 - [ ] Phase 2 / §05B: verify player-specific coverage before claiming operational forecast eligibility; J44/J45 remain provisional/shadow only.
 - [ ] Phase 2 live pipeline: assemble player-specific required finalized fixtures and one repeatable-read view, call the J42 pure gate before assembling personal/current-position inputs, then adapt current rows and integrate prior selection with the predictor.
 - [ ] Phase 2: capture pre-deadline forecast bundles once the predictor exists
@@ -137,6 +141,8 @@ Anything implemented differently than `docs/spec/` says goes here immediately. S
 ## Known Issues / Gotchas
 Things the next session should know before touching this code.
 
+- Test realistic shapes of provider API flags, including completed fixtures that still have `finished_provisional=true`; assumptions about flag combinations can silently remove valid research rows.
+
 - Put future persistent project extras outside the repository under `../fpl-optimizer(extra)/`, using a suitable subfolder. Write benchmark artifacts to `../fpl-optimizer(extra)/fpl-benchmark-reports/`; do not recreate the old home-folder reports directory. `/tmp` can be cleared between tasks. Preserve verified copies in `docs/benchmarks/` when the owner directs. A completed historical runner still has an old-folder default; do not rerun the one-time comparison. Keep private local details out of this public file.
 
 - Node.js and npm are not currently available on this machine; they must be installed before the Next.js scaffold is created.
@@ -165,6 +171,9 @@ Things the next session should know before touching this code.
 
 ## Tool Log
 Which tool did which piece of work — useful for knowing where to look first if something breaks.
+
+- **Tool: Sol — 2026-11-01 (GW9 handoff).** Updated this handoff with the owner-supplied scheduled-run evidence, the invalid GW9 bundle outcome, the GW10 proof requirement, and the real API flag-shape lesson. Documentation only; no live capture, test run or push.
+- **Tool: Antigravity — 2026-11-01 (read-only review of `e42342f`).** Review passed: no leak found, other uses of the provisional flag were safe, and the regression test is sensitive to the veto. It could not run the test because the local database was stopped.
 
 - **Tool: Codex — 2026-10-31 (J50 research finalization fix).** First ran an untracked local diagnostic using the production read-only snapshot, existing labels/input/bundle assembly, and an in-memory comparison that ignored only the provisional fixture flag. No ingestion lock, storage access, upload or FPL call was involved. This confirmed that the flag veto emptied usable histories and position pools despite current `use` labels. Detailed observations remain private. Removed only that veto; finalized research history requires a finished fixture, a checked gameweek before the target, and a present kickoff strictly before capture. Updated old test assumptions and added `test_production_finished_flags_retain_history_and_predictions`, which exercises the database view through labels, inputs and serialization with both finish flags true. It failed on the old code with `assert () == (11, 15)` and passed after the fix. The requested repository-source break test restored the old veto and reproduced that failure; the source was restored byte-for-byte from a temporary backup, the full Git diff matched, and the backup was deleted without checkout restore. Focused verification: **52 passed**. Full guarded Python 3.14.7 suite: **800 passed, 1 optional pinned-archive skipped** (= 799 + one new regression), in **30.52 seconds**. J42 consumes checkpoint coverage evidence; J44/J45 use finished/checked observations; benchmark-facing code has no equivalent provisional-flag veto. No changes to those paths, workflow, ingestion, raw-shared behavior or agent guidance. Private J50 and §05D clarify finalization. No push; existing stored captures are not reconstructed.
 
