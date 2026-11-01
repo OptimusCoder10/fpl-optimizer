@@ -172,6 +172,8 @@ Things the next session should know before touching this code.
 ## Tool Log
 Which tool did which piece of work — useful for knowing where to look first if something breaks.
 
+- **Tool: Codex — 2026-11-01 (public remote check, pushed HEAD `b49a147`).** `git log origin/main..HEAD --oneline` printed no commits; commits through `b49a147`, including `e42342f` (the J50 fix), are on the public remote. The first GW10 capture window opens **6 November 2026 at 00:00 IST**. The fix is still unproven on live data; Slice D and its open provider gates remain open. Documentation only; no push from this task.
+
 - **Tool: Sol — 2026-11-01 (GW9 handoff).** Updated this handoff with the owner-supplied scheduled-run evidence, the invalid GW9 bundle outcome, the GW10 proof requirement, and the real API flag-shape lesson. Documentation only; no live capture, test run or push.
 - **Tool: Antigravity — 2026-11-01 (read-only review of `e42342f`).** Review passed: no leak found, other uses of the provisional flag were safe, and the regression test is sensitive to the veto. It could not run the test because the local database was stopped.
 
