@@ -1,0 +1,57 @@
+name: Audit saved research bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      gameweek:
+        description: Gameweek to inspect
+        type: number
+        required: true
+        default: 10
+      reported_excluded:
+        description: Excluded count from the capture log to compare (pairing is not verified)
+        type: number
+        required: true
+        default: 0
+
+permissions:
+  contents: read
+
+# Keep audits from overlapping without delaying or replacing scheduled ingestion.
+concurrency:
+  group: fpl-research-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.19"
+          enable-cache: false
+      - name: Install Python and locked dependencies
+        run: |
+          uv python install 3.14.7
+          uv sync --frozen --no-dev --no-python-downloads
+      - name: Read and verify saved research bundle
+        timeout-minutes: 4
+        env:
+          FPL_STORAGE_URL: ${{ secrets.FPL_STORAGE_URL }}
+          FPL_STORAGE_KEY: ${{ secrets.FPL_STORAGE_KEY }}
+          FPL_STORAGE_BUCKET: ${{ secrets.FPL_STORAGE_BUCKET }}
+          FPL_STORAGE_ALLOWANCE_BYTES: ${{ vars.FPL_STORAGE_ALLOWANCE_BYTES }}
+          FPL_SEASON_ID: ${{ vars.FPL_SEASON_ID }}
+          AUDIT_GAMEWEEK: ${{ inputs.gameweek }}
+          AUDIT_REPORTED_EXCLUDED: ${{ inputs.reported_excluded }}
+        run: .venv/bin/python -m fpl_optimizer.audit_research
