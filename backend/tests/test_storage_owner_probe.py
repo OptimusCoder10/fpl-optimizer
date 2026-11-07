@@ -14,7 +14,7 @@ from fpl_optimizer import storage_owner_probe as mod
 
 @pytest.fixture
 def fake(monkeypatch):
-    state = SimpleNamespace(seconds=0, calls=[], data={}, duplicate=409, corrupt=False, missing=False, fault=None, stream_failure=None)
+    state = SimpleNamespace(seconds=0, calls=[], data={}, duplicate=409, corrupt=False, missing=False, fault=None, stream_failure=None, fallback_failure=None)
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     class Clock:
         @staticmethod
@@ -28,6 +28,10 @@ def fake(monkeypatch):
             assert kwargs['follow_redirects'] is False and kwargs['trust_env'] is False
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
+        async def request(self, method, path, **kwargs):
+            if method == 'POST': return await self.post(path, **kwargs)
+            if method == 'GET': return await self.get(path, **kwargs)
+            raise AssertionError('no delete or other operations allowed')
         async def post(self, path, **kwargs):
             state.calls.append(('POST', path, kwargs))
             if path.startswith('/object/list/'):
@@ -47,8 +51,11 @@ def fake(monkeypatch):
                 if state.fault == 'overwrite_check_failed': raise ValueError('private-marker')
                 if state.duplicate == 200: state.data[path] = body
                 return response(state.duplicate, json={'error': 'Duplicate'})
-            if state.fault == 'first_upload_failed': raise httpx.ConnectError('private-marker')
+            if state.fault == 'first_upload_failed': raise ValueError('private-marker')
             if state.fault == 'first_upload_rejected': return response(403, json={'private': 'private-marker'})
+            if len(state.data) == 1 and state.fallback_failure:
+                if isinstance(state.fallback_failure, type): raise state.fallback_failure('private-marker')
+                return response(state.fallback_failure, json={'private': 'private-marker'})
             state.data[path] = body
             if len(state.data) == 1 and state.stream_failure:
                 if state.stream_failure == 'timeout': raise httpx.ReadTimeout('private-marker')
@@ -144,6 +151,7 @@ def test_workflow_is_manual_no_inputs_and_storage_secrets_only():
     'upload_timestamp_invalid', 'overwrite_check_failed', 'overwrite_not_rejected',
     'readback_failed', 'readback_timestamp_invalid', 'listing_failed', 'listing_invalid',
     'provider_timestamp_invalid', 'probe_timeout', 'internal_error',
+    'fallback_upload_failed', 'fallback_upload_rejected',
 ])
 def test_each_failure_category_prints_without_private_details(fake, monkeypatch, capsys, category):
     def fail(*args, **kwargs): raise ValueError('private-marker')
@@ -157,6 +165,9 @@ def test_each_failure_category_prints_without_private_details(fake, monkeypatch,
     if category == 'clock_jump':
         ticks = iter([0, 999])
         monkeypatch.setattr(mod.time, 'monotonic', lambda: next(ticks, 999))
+    if category.startswith('fallback_upload_'):
+        fake.stream_failure = httpx.WriteError
+        fake.fallback_failure = 403 if category.endswith('rejected') else httpx.ConnectError
     if category == 'overwrite_not_rejected': fake.duplicate = 403
     if category == 'provider_timestamp_invalid': fake.missing = True
     if category == 'internal_error': monkeypatch.setattr(mod, 'uuid4', fail)
@@ -202,6 +213,7 @@ def test_fallback_uses_fresh_synthetic_key_and_leaves_gate2_untested(fake, monke
     assert 'private-marker' not in output.out + output.err
     report = json.loads(output.out)
     assert report['failure_category'] is None
+    assert report['fallback_upload_status'] == 200
     assert report['first_upload_status'] == (failure if type(failure) is int else None)
     assert report['stream_failure_category'] == category
     assert report['upload_mode'] == 'normal_fallback'
@@ -240,3 +252,79 @@ def test_unexpected_stream_exception_remains_failure_without_retry(fake, monkeyp
     assert report['first_upload_status'] is None
     assert report['stream_failure_category'] is None
     assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize('status', [400, 401, 403, 409, 500])
+def test_stream_transport_failure_then_fallback_rejection_has_its_own_status(fake, monkeypatch, capsys, status):
+    fake.stream_failure = httpx.WriteError
+    fake.fallback_failure = status
+    monkeypatch.setattr(mod.sys, 'argv', ['probe'])
+    assert mod.main() == 1
+    output = capsys.readouterr()
+    assert 'private-marker' not in output.out + output.err
+    report = json.loads(output.out)
+    assert report['first_upload_status'] is None
+    assert report['fallback_upload_status'] == status, 'fallback HTTP response must have its own numeric status'
+    assert report['failure_category'] == 'fallback_upload_rejected'
+    assert report['stream_failure_category'] == 'stream_connection_failed'
+    assert len(fake.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_probe_and_uploader_share_client_policy_with_fresh_fallback(monkeypatch):
+    from fpl_optimizer.services import research_storage, shared_archive, storage_http
+    from pydantic import SecretStr
+    real_client = httpx.AsyncClient
+    clients, calls, objects = [], [], {}
+    async def handle(request):
+        body = await request.aread()
+        calls.append(request)
+        path = request.url.path
+        headers = {'Date': format_datetime(datetime.now(timezone.utc))}
+        if '/object/list/' in path:
+            return httpx.Response(200, headers=headers, json=[{
+                'name': 'probe.bin', 'metadata': {'size': 64},
+                'created_at': datetime.now(timezone.utc).isoformat(),
+            }])
+        if request.method == 'GET':
+            return httpx.Response(200, headers=headers, content=objects[path.replace('/authenticated', '')])
+        assert request.method == 'POST', 'no delete calls'
+        assert request.headers['apikey'] == 'synthetic'
+        assert 'authorization' not in request.headers
+        assert request.headers['x-upsert'] == 'false'
+        assert request.headers['cache-control'] == 'private, max-age=0'
+        assert request.headers['content-type'] == 'application/json'
+        assert int(request.headers['content-length']) == len(body)
+        json.loads(body)
+        if len(calls) == 1: raise httpx.WriteError('private-marker')
+        if path in objects:
+            return httpx.Response(409, headers=headers, json={'errorCode': 'Duplicate'})
+        objects[path] = body
+        return httpx.Response(200, headers=headers, json={})
+    def factory(**kwargs):
+        assert kwargs['trust_env'] is False and kwargs['follow_redirects'] is False
+        assert 'verify' not in kwargs and 'cert' not in kwargs
+        clients.append(kwargs)
+        return real_client(**kwargs, transport=httpx.MockTransport(handle))
+    async def no_wait(seconds): assert seconds == 30
+    monkeypatch.setattr(httpx, 'AsyncClient', factory)
+    monkeypatch.setattr(mod.asyncio, 'sleep', no_wait)
+    for key, value in [('URL', 'https://example.invalid'), ('BUCKET', 'synthetic'), ('KEY', 'synthetic')]:
+        monkeypatch.setenv('FPL_STORAGE_' + key, value)
+    assert mod.storage_client is shared_archive.storage_client is storage_http.storage_client
+    report = mod.empty_report()
+    assert await mod.probe(report)
+    assert report['fallback_upload_status'] == 200 and report['failure_category'] is None
+    assert report['gate2_timing_observation'] == 'untested'
+    assert len(clients) == len(calls) == 5, 'each request must use a fresh client'
+    assert clients[0]['timeout'] == httpx.Timeout(60)
+    assert all(c['timeout'] == httpx.Timeout(20) for c in clients[1:])
+    assert calls[0].url.path != calls[1].url.path
+    assert all('/storage/v1/object/' in r.url.path for r in calls)
+    settings = SimpleNamespace(fpl_storage_url='https://example.invalid', fpl_storage_bucket='synthetic',
+                               fpl_storage_key=SecretStr('synthetic'), fpl_storage_allowance_bytes=1)
+    uploader = research_storage.ResearchStorage(settings)
+    await uploader.put(mod.PREFIX + 'synthetic-comparison.json', mod.A, 'application/json')
+    assert len(clients) == 6 and clients[-1]['timeout'] == httpx.Timeout(20)
+    for header in ('apikey', 'content-type', 'cache-control', 'x-upsert', 'content-length'):
+        assert calls[1].headers[header] == calls[-1].headers[header]

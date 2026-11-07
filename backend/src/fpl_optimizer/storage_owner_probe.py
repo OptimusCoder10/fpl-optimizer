@@ -16,17 +16,19 @@ from pydantic import SecretStr
 
 from fpl_optimizer.services.research_storage import aware, timestamp
 from fpl_optimizer.services.shared_archive import SupabaseStorage
+from fpl_optimizer.services.storage_http import storage_client
 
 
 PREFIX = "research-bundles/self-test/owner-gates/"
-A = b"A" * 64
-B = b"B" * 64
+A = b'{"probe":"A"}'.ljust(64)
+B = b'{"probe":"B"}'.ljust(64)
 FAILURES = frozenset({
     "arguments_rejected", "config_missing", "config_invalid", "client_setup_failed",
     "clock_failed", "first_upload_failed", "first_upload_rejected", "clock_jump",
     "upload_timestamp_invalid", "overwrite_check_failed", "overwrite_not_rejected",
     "readback_failed", "readback_timestamp_invalid", "listing_failed", "listing_invalid",
     "provider_timestamp_invalid", "probe_timeout", "internal_error",
+    "fallback_upload_failed", "fallback_upload_rejected",
 })
 STREAM_FAILURES = frozenset({
     "stream_timeout", "stream_interrupted", "stream_rejected", "stream_connection_failed",
@@ -35,6 +37,7 @@ STREAM_FAILURES = frozenset({
 
 def empty_report():
     return dict(failure_category="internal_error", stream_failure_category=None, first_upload_status=None,
+                fallback_upload_status=None,
                 upload_mode="not_started", gate2_timing_observation="untested",
                 overwrite_rejected="no", a_intact="no",
                 created_minus_before_seconds=None, created_minus_after_seconds=None,
@@ -65,98 +68,108 @@ async def probe(report):
         await asyncio.sleep(30)
         yield A[32:]
 
-    report["failure_category"] = "client_setup_failed"
-    async with httpx.AsyncClient(
-        base_url=config._url, headers={"apikey": config._key},
-        trust_env=False, follow_redirects=False, timeout=60,
-    ) as client:
-        headers = {"Content-Type": "application/octet-stream", "Content-Length": "64"}
-        headers["x-upsert"] = "false"
+    async def request(method, path, *, streamed=False, **kwargs):
+        # Same client policy as capture; never reuse a failed stream's connection.
+        phase = report["failure_category"]
+        report["failure_category"] = "client_setup_failed"
+        async with storage_client(config._url, config._key, timeout=60 if streamed else 20) as client:
+            report["failure_category"] = phase
+            return await client.request(method, path, **kwargs)
+
+    headers = {"Content-Type": "application/json", "cache-control": "private, max-age=0"}
+    headers["x-upsert"] = "false"
+    report["failure_category"] = "clock_failed"
+    before, tick = wall(), time.monotonic()
+    report["failure_category"] = "first_upload_failed"
+    report["upload_mode"] = "streamed"
+    uploaded = None
+    try:
+        uploaded = await request(
+            "POST", f"/object/{config._bucket}/{key}", content=slow_bytes(),
+            headers={**headers, "Content-Length": str(len(A))}, streamed=True,
+        )
+    except httpx.TimeoutException:
+        report["stream_failure_category"] = "stream_timeout"
+    except httpx.RemoteProtocolError:
+        report["stream_failure_category"] = "stream_interrupted"
+    except httpx.TransportError:
+        report["stream_failure_category"] = "stream_connection_failed"
+    if uploaded is not None:
+        report["first_upload_status"] = uploaded.status_code
+    if uploaded is not None and uploaded.status_code in {408, 411, 501}:
+        report["stream_failure_category"] = "stream_rejected"
+    if report["stream_failure_category"] is not None:
+        # The first upload may have persisted. Never reuse its destination.
+        folder = PREFIX + uuid4().hex
+        key = folder + "/probe.bin"
+        report["upload_mode"] = "normal_fallback"
         report["failure_category"] = "clock_failed"
         before, tick = wall(), time.monotonic()
-        report["failure_category"] = "first_upload_failed"
-        report["upload_mode"] = "streamed"
-        uploaded = None
-        try:
-            uploaded = await client.post(f"/object/{config._bucket}/{key}",
-                                         content=slow_bytes(), headers=headers)
-        except httpx.TimeoutException:
-            report["stream_failure_category"] = "stream_timeout"
-        except httpx.RemoteProtocolError:
-            report["stream_failure_category"] = "stream_interrupted"
-        except httpx.TransportError:
-            report["stream_failure_category"] = "stream_connection_failed"
-        if uploaded is not None:
-            report["first_upload_status"] = uploaded.status_code
-        if uploaded is not None and uploaded.status_code in {408, 411, 501}:
-            report["stream_failure_category"] = "stream_rejected"
-        if report["stream_failure_category"] is not None:
-            # The first upload may have persisted. Never reuse its destination.
-            folder = PREFIX + uuid4().hex
-            key = folder + "/probe.bin"
-            report["upload_mode"] = "normal_fallback"
-            report["failure_category"] = "clock_failed"
-            before, tick = wall(), time.monotonic()
-            report["failure_category"] = "first_upload_failed"
-            uploaded = await client.post(f"/object/{config._bucket}/{key}", content=A, headers=headers)
-        report["failure_category"] = "clock_failed"
-        after, tock = wall(), time.monotonic()
-        report["failure_category"] = "first_upload_rejected"
-        uploaded.raise_for_status()
-        report["failure_category"] = "clock_jump"
-        if abs((after - before).total_seconds() - (tock - tick)) > 2:
-            raise ValueError("clock jump")
-        report["failure_category"] = "upload_timestamp_invalid"
-        report["upload_date_minus_after_seconds"] = (
-            aware(parsedate_to_datetime(uploaded.headers["Date"])) - after).total_seconds()
-        report["failure_category"] = "overwrite_check_failed"
-        duplicate = await client.post(f"/object/{config._bucket}/{key}", content=B, headers=headers)
-        rejected = duplicate.status_code == 409
-        if duplicate.status_code == 400:
-            body = duplicate.json()
-            rejected = (body.get("errorCode") or body.get("code") or body.get("error")) in {
-                "AssetAlreadyExists", "already_exists", "Duplicate", "Asset Already Exists",
-            }
-        report["overwrite_rejected"] = "yes" if rejected else "no"
-        report["failure_category"] = "readback_failed"
-        fetched = await client.get(f"/object/authenticated/{config._bucket}/{key}",
-                                   headers={"cache-control": "no-cache, no-store"})
-        get_runner = wall()
-        fetched.raise_for_status()
-        report["a_intact"] = "yes" if fetched.content == A else "no"
-        if fetched.content != A:
-            return False
-        report["failure_category"] = "readback_timestamp_invalid"
-        report["get_date_minus_runner_seconds"] = (
-            aware(parsedate_to_datetime(fetched.headers["Date"])) - get_runner).total_seconds()
-        # Read just this new synthetic folder; listing never chooses a write target.
-        report["failure_category"] = "listing_failed"
-        listing = await client.post(f"/object/list/{config._bucket}", json={
-            "prefix": folder, "limit": 2, "offset": 0,
-            "sortBy": {"column": "name", "order": "asc"},
-        })
-        runner = wall()
-        listing.raise_for_status()
-        report["failure_category"] = "listing_invalid"
-        rows = listing.json()
-        if len(rows) != 1 or rows[0]["name"] != "probe.bin" or rows[0]["metadata"]["size"] != 64:
-            raise ValueError("unexpected synthetic listing")
-        report["failure_category"] = "provider_timestamp_invalid"
-        created = timestamp(rows[0]["created_at"])
-        for label, bound in (("before", before), ("after", after), ("runner", runner)):
-            report[f"created_minus_{label}_seconds"] = (created - bound).total_seconds()
-        report["runner_minus_provider_seconds"] = (
-            runner - aware(parsedate_to_datetime(listing.headers["Date"]))).total_seconds()
-        for field, label in (("updated_at", "updated"), ("last_accessed_at", "last_accessed")):
-            if rows[0].get(field):
-                report[f"{label}_minus_created_seconds"] = (timestamp(rows[0][field]) - created).total_seconds()
-        if fetched.headers.get("Last-Modified"):
-            report["last_modified_minus_created_seconds"] = (
-                aware(parsedate_to_datetime(fetched.headers["Last-Modified"])) - created).total_seconds()
-        if report["upload_mode"] == "streamed":
-            report["gate2_timing_observation"] = "delayed_upload_observed"
-        report["failure_category"] = None if rejected else "overwrite_not_rejected"
-        return rejected
+        report["failure_category"] = "fallback_upload_failed"
+        uploaded = await request("POST", f"/object/{config._bucket}/{key}", content=A, headers=headers)
+        report["fallback_upload_status"] = uploaded.status_code
+    report["failure_category"] = "clock_failed"
+    after, tock = wall(), time.monotonic()
+    report["failure_category"] = (
+        "fallback_upload_rejected" if report["upload_mode"] == "normal_fallback" else "first_upload_rejected"
+    )
+    uploaded.raise_for_status()
+    report["failure_category"] = "clock_jump"
+    if abs((after - before).total_seconds() - (tock - tick)) > 2:
+        raise ValueError("clock jump")
+    report["failure_category"] = "upload_timestamp_invalid"
+    report["upload_date_minus_after_seconds"] = (
+        aware(parsedate_to_datetime(uploaded.headers["Date"])) - after).total_seconds()
+    report["failure_category"] = "overwrite_check_failed"
+    duplicate = await request("POST", f"/object/{config._bucket}/{key}", content=B, headers=headers)
+    rejected = duplicate.status_code == 409
+    if duplicate.status_code == 400:
+        body = duplicate.json()
+        rejected = (body.get("errorCode") or body.get("code") or body.get("error")) in {
+            "AssetAlreadyExists", "already_exists", "Duplicate", "Asset Already Exists",
+        }
+    report["overwrite_rejected"] = "yes" if rejected else "no"
+    report["failure_category"] = "readback_failed"
+    fetched = await request(
+        "GET", f"/object/authenticated/{config._bucket}/{key}",
+        headers={"cache-control": "no-cache, no-store"},
+    )
+    get_runner = wall()
+    fetched.raise_for_status()
+    report["a_intact"] = "yes" if fetched.content == A else "no"
+    if fetched.content != A:
+        return False
+    report["failure_category"] = "readback_timestamp_invalid"
+    report["get_date_minus_runner_seconds"] = (
+        aware(parsedate_to_datetime(fetched.headers["Date"])) - get_runner).total_seconds()
+    # Read just this new synthetic folder; listing never chooses a write target.
+    report["failure_category"] = "listing_failed"
+    listing = await request("POST", f"/object/list/{config._bucket}", json={
+        "prefix": folder, "limit": 2, "offset": 0,
+        "sortBy": {"column": "name", "order": "asc"},
+    })
+    runner = wall()
+    listing.raise_for_status()
+    report["failure_category"] = "listing_invalid"
+    rows = listing.json()
+    if len(rows) != 1 or rows[0]["name"] != "probe.bin" or rows[0]["metadata"]["size"] != 64:
+        raise ValueError("unexpected synthetic listing")
+    report["failure_category"] = "provider_timestamp_invalid"
+    created = timestamp(rows[0]["created_at"])
+    for label, bound in (("before", before), ("after", after), ("runner", runner)):
+        report[f"created_minus_{label}_seconds"] = (created - bound).total_seconds()
+    report["runner_minus_provider_seconds"] = (
+        runner - aware(parsedate_to_datetime(listing.headers["Date"]))).total_seconds()
+    for field, label in (("updated_at", "updated"), ("last_accessed_at", "last_accessed")):
+        if rows[0].get(field):
+            report[f"{label}_minus_created_seconds"] = (timestamp(rows[0][field]) - created).total_seconds()
+    if fetched.headers.get("Last-Modified"):
+        report["last_modified_minus_created_seconds"] = (
+            aware(parsedate_to_datetime(fetched.headers["Last-Modified"])) - created).total_seconds()
+    if report["upload_mode"] == "streamed":
+        report["gate2_timing_observation"] = "delayed_upload_observed"
+    report["failure_category"] = None if rejected else "overwrite_not_rejected"
+    return rejected
 
 
 async def bounded(report):

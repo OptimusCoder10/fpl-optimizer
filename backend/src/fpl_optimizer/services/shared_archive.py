@@ -14,6 +14,7 @@ from uuid import uuid4
 import httpx
 
 from fpl_optimizer.config import Settings
+from fpl_optimizer.services.storage_http import storage_client
 
 ARCHIVE_SCHEMA_VERSION = "raw-shared-snapshot-v1"
 SOURCE_ENDPOINTS = ("/api/bootstrap-static/", "/api/fixtures/")
@@ -162,11 +163,7 @@ class SupabaseStorage:
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         token = _storage_request_active.set(True)
         try:
-            async with httpx.AsyncClient(
-                base_url=self._url, trust_env=False, follow_redirects=False,
-                timeout=httpx.Timeout(20.0),
-                headers={"apikey": self._key},
-            ) as client:
+            async with storage_client(self._url, self._key) as client:
                 response = await client.request(method, path, **kwargs)
         except (httpx.HTTPError, TimeoutError):
             raise ArchiveError("transport") from None
