@@ -1,0 +1,42 @@
+name: Check synthetic storage owner gates
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize probes separately from scheduled ingestion.
+concurrency:
+  group: fpl-storage-owner-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.19"
+          enable-cache: false
+      - name: Install Python and locked dependencies
+        run: |
+          uv python install 3.14.7
+          uv sync --frozen --no-dev --no-python-downloads
+      - name: Check synthetic object only
+        timeout-minutes: 4
+        env:
+          FPL_STORAGE_URL: ${{ secrets.FPL_STORAGE_URL }}
+          FPL_STORAGE_KEY: ${{ secrets.FPL_STORAGE_KEY }}
+          FPL_STORAGE_BUCKET: ${{ secrets.FPL_STORAGE_BUCKET }}
+        run: .venv/bin/python -m fpl_optimizer.storage_owner_probe
