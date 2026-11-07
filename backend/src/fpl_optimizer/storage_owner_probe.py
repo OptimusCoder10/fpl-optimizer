@@ -28,11 +28,13 @@ FAILURES = frozenset({
     "readback_failed", "readback_timestamp_invalid", "listing_failed", "listing_invalid",
     "provider_timestamp_invalid", "probe_timeout", "internal_error",
 })
-STREAM_FAILURES = frozenset({"stream_timeout", "stream_interrupted", "stream_rejected"})
+STREAM_FAILURES = frozenset({
+    "stream_timeout", "stream_interrupted", "stream_rejected", "stream_connection_failed",
+})
 
 
 def empty_report():
-    return dict(failure_category="internal_error", stream_failure_category=None,
+    return dict(failure_category="internal_error", stream_failure_category=None, first_upload_status=None,
                 upload_mode="not_started", gate2_timing_observation="untested",
                 overwrite_rejected="no", a_intact="no",
                 created_minus_before_seconds=None, created_minus_after_seconds=None,
@@ -82,6 +84,10 @@ async def probe(report):
             report["stream_failure_category"] = "stream_timeout"
         except httpx.RemoteProtocolError:
             report["stream_failure_category"] = "stream_interrupted"
+        except httpx.TransportError:
+            report["stream_failure_category"] = "stream_connection_failed"
+        if uploaded is not None:
+            report["first_upload_status"] = uploaded.status_code
         if uploaded is not None and uploaded.status_code in {408, 411, 501}:
             report["stream_failure_category"] = "stream_rejected"
         if report["stream_failure_category"] is not None:

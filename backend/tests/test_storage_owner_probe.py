@@ -53,6 +53,7 @@ def fake(monkeypatch):
             if len(state.data) == 1 and state.stream_failure:
                 if state.stream_failure == 'timeout': raise httpx.ReadTimeout('private-marker')
                 if state.stream_failure == 'interrupted': raise httpx.RemoteProtocolError('private-marker')
+                if isinstance(state.stream_failure, type): raise state.stream_failure('private-marker')
                 return response(state.stream_failure, json={'private': 'private-marker'})
             if state.fault == 'upload_timestamp_invalid': return response(200, json={}, no_date=True)
             return response(200, json={})
@@ -185,13 +186,23 @@ def test_unknown_failure_category_is_never_printed(monkeypatch, capsys):
 @pytest.mark.parametrize('failure,category', [
     ('timeout', 'stream_timeout'), ('interrupted', 'stream_interrupted'),
     (408, 'stream_rejected'), (411, 'stream_rejected'), (501, 'stream_rejected'),
+    (httpx.ConnectError, 'stream_connection_failed'),
+    (httpx.ReadError, 'stream_connection_failed'),
+    (httpx.WriteError, 'stream_connection_failed'),
+    (httpx.CloseError, 'stream_connection_failed'),
+    (httpx.LocalProtocolError, 'stream_connection_failed'),
+    (httpx.ProxyError, 'stream_connection_failed'),
+    (httpx.UnsupportedProtocol, 'stream_connection_failed'),
 ])
 def test_fallback_uses_fresh_synthetic_key_and_leaves_gate2_untested(fake, monkeypatch, capsys, failure, category):
     fake.stream_failure = failure
     monkeypatch.setattr(mod.sys, 'argv', ['probe'])
     assert mod.main() == 0
-    report = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr()
+    assert 'private-marker' not in output.out + output.err
+    report = json.loads(output.out)
     assert report['failure_category'] is None
+    assert report['first_upload_status'] == (failure if type(failure) is int else None)
     assert report['stream_failure_category'] == category
     assert report['upload_mode'] == 'normal_fallback'
     assert report['gate2_timing_observation'] == 'untested'
@@ -200,3 +211,32 @@ def test_fallback_uses_fresh_synthetic_key_and_leaves_gate2_untested(fake, monke
     assert len(writes) == 3 and writes[0] != writes[1] == writes[2], 'fallback must use a fresh synthetic key'
     assert len(fake.data) == 2 and all(body == mod.A for body in fake.data.values())
     assert all(mod.PREFIX in path for path in writes)
+
+
+@pytest.mark.parametrize('status', [400, 401, 403, 409, 500])
+def test_first_upload_status_is_numeric_and_does_not_retry_other_rejections(fake, monkeypatch, capsys, status):
+    fake.stream_failure = status
+    monkeypatch.setattr(mod.sys, 'argv', ['probe'])
+    assert mod.main() == 1
+    output = capsys.readouterr()
+    assert 'private-marker' not in output.out + output.err
+    report = json.loads(output.out)
+    assert type(report['first_upload_status']) is int
+    assert report['first_upload_status'] == status
+    assert report['failure_category'] == 'first_upload_rejected'
+    assert report['stream_failure_category'] is None
+    assert report['upload_mode'] == 'streamed'
+    assert len(fake.calls) == 1, 'auth and unrelated HTTP errors must not trigger fallback'
+
+
+def test_unexpected_stream_exception_remains_failure_without_retry(fake, monkeypatch, capsys):
+    fake.stream_failure = ValueError
+    monkeypatch.setattr(mod.sys, 'argv', ['probe'])
+    assert mod.main() == 1
+    output = capsys.readouterr()
+    assert 'private-marker' not in output.out + output.err
+    report = json.loads(output.out)
+    assert report['failure_category'] == 'first_upload_failed'
+    assert report['first_upload_status'] is None
+    assert report['stream_failure_category'] is None
+    assert len(fake.calls) == 1
