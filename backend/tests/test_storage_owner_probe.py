@@ -14,7 +14,7 @@ from fpl_optimizer import storage_owner_probe as mod
 
 @pytest.fixture
 def fake(monkeypatch):
-    state = SimpleNamespace(seconds=0, calls=[], data={}, duplicate=409, corrupt=False, missing=False, fault=None, stream_failure=None, fallback_failure=None)
+    state = SimpleNamespace(seconds=0, calls=[], data={}, duplicate=409, corrupt=False, missing=False, fault=None, stream_failure=None, fallback_failure=None, duplicate_body={"error": "Duplicate"}, listings=0, changed=False, missing_updated=False, preserve_on_success=False)
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     class Clock:
         @staticmethod
@@ -38,8 +38,13 @@ def fake(monkeypatch):
                 assert kwargs['json']['prefix'].startswith(mod.PREFIX)
                 if state.fault == 'listing_failed': return response(503, json={})
                 if state.fault == 'listing_invalid': return response(200, json=[])
+                state.listings += 1
                 row = dict(name='probe.bin', metadata={'size': 64}, created_at=Clock.now(None).isoformat(),
                            updated_at=Clock.now(None).isoformat())
+                if state.changed and state.listings % 2 == 0:
+                    row['updated_at'] = (Clock.now(None) + timedelta(seconds=1)).isoformat()
+                if state.missing_updated is True or (state.missing_updated == 'after' and state.listings % 2 == 0):
+                    row.pop('updated_at')
                 if state.missing: row.pop('created_at')
                 return response(200, json=[row])
             assert kwargs['headers'].get('x-upsert') == 'false', 'overwrite-disable header required'
@@ -49,8 +54,8 @@ def fake(monkeypatch):
             assert len(body) == 64
             if path in state.data:
                 if state.fault == 'overwrite_check_failed': raise ValueError('private-marker')
-                if state.duplicate == 200: state.data[path] = body
-                return response(state.duplicate, json={'error': 'Duplicate'})
+                if state.duplicate == 200 and not state.preserve_on_success: state.data[path] = body
+                return response(state.duplicate, json=state.duplicate_body)
             if state.fault == 'first_upload_failed': raise ValueError('private-marker')
             if state.fault == 'first_upload_rejected': return response(403, json={'private': 'private-marker'})
             if len(state.data) == 1 and state.fallback_failure:
@@ -95,7 +100,7 @@ async def test_fixed_synthetic_destination_slow_stream_and_upsert_guard(fake, du
     writes = [path for verb, path, _ in fake.calls if verb == 'POST' and '/list/' not in path]
     assert len(writes) == 2 and writes[0] == writes[1]
     assert mod.PREFIX in writes[0] and 'deadline-window' not in writes[0]
-    assert [verb for verb, _, _ in fake.calls] == ['POST', 'POST', 'GET', 'POST']
+    assert [verb for verb, _, _ in fake.calls] == ['POST', 'POST', 'POST', 'GET', 'POST']
     assert fake.calls[-1][2]['json']['prefix'] + '/probe.bin' == writes[0].split('/synthetic/')[1]
     await mod.probe(mod.empty_report())
     assert len(fake.data) == 2, 'each invocation must generate a fresh destination'
@@ -106,7 +111,8 @@ async def test_fixed_synthetic_destination_slow_stream_and_upsert_guard(fake, du
 async def test_failures_cannot_report_success(fake, failure):
     if failure == 'overwrite': fake.duplicate = 200
     if failure == 'corrupt': fake.corrupt = True
-    if failure == 'unrelated_rejection': fake.duplicate = 403
+    if failure == 'unrelated_rejection':
+        fake.duplicate = 403; fake.duplicate_body = {'code': 'AccessDenied'}
     if failure == 'missing_creation':
         fake.missing = True
         with pytest.raises(KeyError): await mod.probe(mod.empty_report())
@@ -151,7 +157,7 @@ def test_workflow_is_manual_no_inputs_and_storage_secrets_only():
     'upload_timestamp_invalid', 'overwrite_check_failed', 'overwrite_not_rejected',
     'readback_failed', 'readback_timestamp_invalid', 'listing_failed', 'listing_invalid',
     'provider_timestamp_invalid', 'probe_timeout', 'internal_error',
-    'fallback_upload_failed', 'fallback_upload_rejected',
+    'fallback_upload_failed', 'fallback_upload_rejected', 'object_timestamp_changed',
 ])
 def test_each_failure_category_prints_without_private_details(fake, monkeypatch, capsys, category):
     def fail(*args, **kwargs): raise ValueError('private-marker')
@@ -168,7 +174,9 @@ def test_each_failure_category_prints_without_private_details(fake, monkeypatch,
     if category.startswith('fallback_upload_'):
         fake.stream_failure = httpx.WriteError
         fake.fallback_failure = 403 if category.endswith('rejected') else httpx.ConnectError
-    if category == 'overwrite_not_rejected': fake.duplicate = 403
+    if category == 'overwrite_not_rejected':
+        fake.duplicate = 403; fake.duplicate_body = {'code': 'AccessDenied'}
+    if category == 'object_timestamp_changed': fake.changed = True
     if category == 'provider_timestamp_invalid': fake.missing = True
     if category == 'internal_error': monkeypatch.setattr(mod, 'uuid4', fail)
     if category == 'probe_timeout':
@@ -276,6 +284,7 @@ async def test_probe_and_uploader_share_client_policy_with_fresh_fallback(monkey
     from pydantic import SecretStr
     real_client = httpx.AsyncClient
     clients, calls, objects = [], [], {}
+    object_time = datetime.now(timezone.utc).isoformat()
     async def handle(request):
         body = await request.aread()
         calls.append(request)
@@ -284,7 +293,7 @@ async def test_probe_and_uploader_share_client_policy_with_fresh_fallback(monkey
         if '/object/list/' in path:
             return httpx.Response(200, headers=headers, json=[{
                 'name': 'probe.bin', 'metadata': {'size': 64},
-                'created_at': datetime.now(timezone.utc).isoformat(),
+                'created_at': object_time, 'updated_at': object_time,
             }])
         if request.method == 'GET':
             return httpx.Response(200, headers=headers, content=objects[path.replace('/authenticated', '')])
@@ -316,7 +325,7 @@ async def test_probe_and_uploader_share_client_policy_with_fresh_fallback(monkey
     assert await mod.probe(report)
     assert report['fallback_upload_status'] == 200 and report['failure_category'] is None
     assert report['gate2_timing_observation'] == 'untested'
-    assert len(clients) == len(calls) == 5, 'each request must use a fresh client'
+    assert len(clients) == len(calls) == 6, 'each request must use a fresh client'
     assert clients[0]['timeout'] == httpx.Timeout(60)
     assert all(c['timeout'] == httpx.Timeout(20) for c in clients[1:])
     assert calls[0].url.path != calls[1].url.path
@@ -325,6 +334,68 @@ async def test_probe_and_uploader_share_client_policy_with_fresh_fallback(monkey
                                fpl_storage_key=SecretStr('synthetic'), fpl_storage_allowance_bytes=1)
     uploader = research_storage.ResearchStorage(settings)
     await uploader.put(mod.PREFIX + 'synthetic-comparison.json', mod.A, 'application/json')
-    assert len(clients) == 6 and clients[-1]['timeout'] == httpx.Timeout(20)
+    assert len(clients) == 7 and clients[-1]['timeout'] == httpx.Timeout(20)
     for header in ('apikey', 'content-type', 'cache-control', 'x-upsert', 'content-length'):
         assert calls[1].headers[header] == calls[-1].headers[header]
+
+
+@pytest.mark.parametrize('status,body,kind', [
+    (400, {'code': 'ResourceAlreadyExists', 'error': 'Duplicate'}, 'duplicate_error'),
+    (409, {'code': 'ResourceAlreadyExists'}, 'duplicate_error'),
+    (400, {'statusCode': '409', 'code': 'ResourceAlreadyExists', 'error': 'ResourceAlreadyExists'}, 'duplicate_error'),
+    (400, {'code': 'KeyAlreadyExists'}, 'duplicate_error'),
+    (409, {'errorCode': 'AssetAlreadyExists'}, 'duplicate_error'),
+    (400, {'error': 'Duplicate', 'statusCode': '409'}, 'duplicate_error'),
+    (400, {'error': 'Asset Already Exists'}, 'duplicate_error'),
+    (400, {'code': 'already_exists'}, 'duplicate_error'),
+    (200, {'code': 'ResourceAlreadyExists'}, 'duplicate_error'),
+    (500, {'error': 'Duplicate'}, 'duplicate_error'),
+    (409, {}, 'other_error'),
+    (409, {'code': 'AccessDenied'}, 'other_error'),
+    (403, {'code': 'AccessDenied', 'error': 'Duplicate'}, 'other_error'),
+    (400, {'message': 'The resource already exists'}, 'other_error'),
+    (400, {'code': ['Duplicate']}, 'other_error'),
+    (400, ['Duplicate'], 'other_error'),
+    (200, {}, 'success'),
+])
+def test_overwrite_requires_recognized_body_not_http_status(fake, monkeypatch, capsys, status, body, kind):
+    fake.duplicate, fake.duplicate_body = status, body
+    fake.preserve_on_success = True
+    if isinstance(body, dict): body = {**body, 'private_detail': 'private-marker'}
+    fake.duplicate_body = body
+    monkeypatch.setattr(mod.sys, 'argv', ['probe'])
+    assert mod.main() == (0 if kind == 'duplicate_error' else 1)
+    output = capsys.readouterr()
+    assert 'private-marker' not in output.out + output.err
+    report = json.loads(output.out)
+    assert report['overwrite_status'] == status
+    assert report['overwrite_response_kind'] == kind
+    assert report['a_intact'] == report['updated_unchanged'] == 'yes'
+    assert report['failure_category'] == (None if kind == 'duplicate_error' else 'overwrite_not_rejected')
+
+
+def test_non_json_duplicate_response_is_not_proof():
+    response = httpx.Response(409, text='private-marker')
+    assert mod.overwrite_response_kind(response) == 'other_error'
+
+
+@pytest.mark.parametrize('problem', ['changed', 'missing', 'missing_after', 'bytes_changed'])
+def test_duplicate_body_requires_intact_bytes_and_unchanged_timestamp(fake, monkeypatch, capsys, problem):
+    fake.duplicate_body = {'code': 'ResourceAlreadyExists'}
+    if problem == 'changed': fake.changed = True
+    if problem == 'missing': fake.missing_updated = True
+    if problem == 'missing_after': fake.missing_updated = 'after'
+    if problem == 'bytes_changed': fake.corrupt = True
+    monkeypatch.setattr(mod.sys, 'argv', ['probe'])
+    assert mod.main() == 1, 'duplicate body alone cannot establish overwrite refusal'
+    report = json.loads(capsys.readouterr().out)
+    assert report['failure_category'] == {
+        'changed': 'object_timestamp_changed', 'missing': 'provider_timestamp_invalid',
+        'missing_after': 'provider_timestamp_invalid',
+        'bytes_changed': 'readback_failed',
+    }[problem]
+    if problem == 'missing':
+        assert len(fake.calls) == 2, 'missing baseline timestamp must stop before duplicate write'
+    if problem == 'changed':
+        assert report['overwrite_response_kind'] == 'duplicate_error'
+        assert report['a_intact'] == 'yes' and report['updated_unchanged'] == 'no'
