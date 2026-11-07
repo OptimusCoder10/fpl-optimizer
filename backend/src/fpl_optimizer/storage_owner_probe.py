@@ -21,10 +21,20 @@ from fpl_optimizer.services.shared_archive import SupabaseStorage
 PREFIX = "research-bundles/self-test/owner-gates/"
 A = b"A" * 64
 B = b"B" * 64
+FAILURES = frozenset({
+    "arguments_rejected", "config_missing", "config_invalid", "client_setup_failed",
+    "clock_failed", "first_upload_failed", "first_upload_rejected", "clock_jump",
+    "upload_timestamp_invalid", "overwrite_check_failed", "overwrite_not_rejected",
+    "readback_failed", "readback_timestamp_invalid", "listing_failed", "listing_invalid",
+    "provider_timestamp_invalid", "probe_timeout", "internal_error",
+})
+STREAM_FAILURES = frozenset({"stream_timeout", "stream_interrupted", "stream_rejected"})
 
 
 def empty_report():
-    return dict(overwrite_rejected="no", a_intact="no",
+    return dict(failure_category="internal_error", stream_failure_category=None,
+                upload_mode="not_started", gate2_timing_observation="untested",
+                overwrite_rejected="no", a_intact="no",
                 created_minus_before_seconds=None, created_minus_after_seconds=None,
                 created_minus_runner_seconds=None, runner_minus_provider_seconds=None,
                 upload_date_minus_after_seconds=None, get_date_minus_runner_seconds=None,
@@ -36,6 +46,7 @@ async def probe(report):
     # No caller-supplied destination: neither arguments nor environment select it.
     folder = PREFIX + uuid4().hex
     key = folder + "/probe.bin"
+    report["failure_category"] = "config_missing"
     settings = SimpleNamespace(
         fpl_storage_url=os.environ["FPL_STORAGE_URL"],
         fpl_storage_bucket=os.environ["FPL_STORAGE_BUCKET"],
@@ -43,6 +54,7 @@ async def probe(report):
         fpl_storage_allowance_bytes=1,
     )
     # Reuse configuration validation only; expose no general storage operations.
+    report["failure_category"] = "config_invalid"
     config = SupabaseStorage(settings)
     wall = lambda: datetime.now(timezone.utc)
 
@@ -51,21 +63,47 @@ async def probe(report):
         await asyncio.sleep(30)
         yield A[32:]
 
+    report["failure_category"] = "client_setup_failed"
     async with httpx.AsyncClient(
         base_url=config._url, headers={"apikey": config._key},
         trust_env=False, follow_redirects=False, timeout=60,
     ) as client:
         headers = {"Content-Type": "application/octet-stream", "Content-Length": "64"}
         headers["x-upsert"] = "false"
+        report["failure_category"] = "clock_failed"
         before, tick = wall(), time.monotonic()
-        uploaded = await client.post(f"/object/{config._bucket}/{key}",
-                                     content=slow_bytes(), headers=headers)
+        report["failure_category"] = "first_upload_failed"
+        report["upload_mode"] = "streamed"
+        uploaded = None
+        try:
+            uploaded = await client.post(f"/object/{config._bucket}/{key}",
+                                         content=slow_bytes(), headers=headers)
+        except httpx.TimeoutException:
+            report["stream_failure_category"] = "stream_timeout"
+        except httpx.RemoteProtocolError:
+            report["stream_failure_category"] = "stream_interrupted"
+        if uploaded is not None and uploaded.status_code in {408, 411, 501}:
+            report["stream_failure_category"] = "stream_rejected"
+        if report["stream_failure_category"] is not None:
+            # The first upload may have persisted. Never reuse its destination.
+            folder = PREFIX + uuid4().hex
+            key = folder + "/probe.bin"
+            report["upload_mode"] = "normal_fallback"
+            report["failure_category"] = "clock_failed"
+            before, tick = wall(), time.monotonic()
+            report["failure_category"] = "first_upload_failed"
+            uploaded = await client.post(f"/object/{config._bucket}/{key}", content=A, headers=headers)
+        report["failure_category"] = "clock_failed"
         after, tock = wall(), time.monotonic()
+        report["failure_category"] = "first_upload_rejected"
         uploaded.raise_for_status()
+        report["failure_category"] = "clock_jump"
         if abs((after - before).total_seconds() - (tock - tick)) > 2:
             raise ValueError("clock jump")
+        report["failure_category"] = "upload_timestamp_invalid"
         report["upload_date_minus_after_seconds"] = (
             aware(parsedate_to_datetime(uploaded.headers["Date"])) - after).total_seconds()
+        report["failure_category"] = "overwrite_check_failed"
         duplicate = await client.post(f"/object/{config._bucket}/{key}", content=B, headers=headers)
         rejected = duplicate.status_code == 409
         if duplicate.status_code == 400:
@@ -74,23 +112,30 @@ async def probe(report):
                 "AssetAlreadyExists", "already_exists", "Duplicate", "Asset Already Exists",
             }
         report["overwrite_rejected"] = "yes" if rejected else "no"
+        report["failure_category"] = "readback_failed"
         fetched = await client.get(f"/object/authenticated/{config._bucket}/{key}",
                                    headers={"cache-control": "no-cache, no-store"})
         get_runner = wall()
         fetched.raise_for_status()
         report["a_intact"] = "yes" if fetched.content == A else "no"
+        if fetched.content != A:
+            return False
+        report["failure_category"] = "readback_timestamp_invalid"
         report["get_date_minus_runner_seconds"] = (
             aware(parsedate_to_datetime(fetched.headers["Date"])) - get_runner).total_seconds()
         # Read just this new synthetic folder; listing never chooses a write target.
+        report["failure_category"] = "listing_failed"
         listing = await client.post(f"/object/list/{config._bucket}", json={
             "prefix": folder, "limit": 2, "offset": 0,
             "sortBy": {"column": "name", "order": "asc"},
         })
         runner = wall()
         listing.raise_for_status()
+        report["failure_category"] = "listing_invalid"
         rows = listing.json()
         if len(rows) != 1 or rows[0]["name"] != "probe.bin" or rows[0]["metadata"]["size"] != 64:
             raise ValueError("unexpected synthetic listing")
+        report["failure_category"] = "provider_timestamp_invalid"
         created = timestamp(rows[0]["created_at"])
         for label, bound in (("before", before), ("after", after), ("runner", runner)):
             report[f"created_minus_{label}_seconds"] = (created - bound).total_seconds()
@@ -102,7 +147,10 @@ async def probe(report):
         if fetched.headers.get("Last-Modified"):
             report["last_modified_minus_created_seconds"] = (
                 aware(parsedate_to_datetime(fetched.headers["Last-Modified"])) - created).total_seconds()
-        return rejected and fetched.content == A
+        if report["upload_mode"] == "streamed":
+            report["gate2_timing_observation"] = "delayed_upload_observed"
+        report["failure_category"] = None if rejected else "overwrite_not_rejected"
+        return rejected
 
 
 async def bounded(report):
@@ -115,10 +163,20 @@ def main():
     report = empty_report()
     ok = False
     try:
+        report["failure_category"] = "arguments_rejected"
         if len(sys.argv) != 1: raise ValueError("no caller-supplied destination")
+        report["failure_category"] = "internal_error"
         ok = asyncio.run(bounded(report))
+    except TimeoutError:
+        report["failure_category"] = "probe_timeout"
     except Exception:
         pass  # Never print provider bodies, settings, request URLs or tracebacks.
+    if ok:
+        report["failure_category"] = None
+    elif report["failure_category"] not in FAILURES:
+        report["failure_category"] = "internal_error"
+    if report["stream_failure_category"] not in STREAM_FAILURES:
+        report["stream_failure_category"] = None
     print(json.dumps(report, sort_keys=True, allow_nan=False))
     return 0 if ok else 1
 
