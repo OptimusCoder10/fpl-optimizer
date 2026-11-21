@@ -75,6 +75,15 @@ def test_research_inputs_reject_invalid_label_action():
         assembly.assemble_player_inputs(view, labels | {1: replace(USE, action="BLOCK")})
 
 
+@pytest.mark.xfail(strict=True, reason="excluded research label accepts invalid history_age_status")
+def test_research_inputs_reject_invalid_excluded_history_age_status():
+    view, labels = sample()
+    with pytest.raises(ValueError, match="history_age_status"):
+        assembly.assemble_player_inputs(
+            view, labels | {3: replace(labels[3], history_age_status="invalid")}
+        )
+
+
 def capture_selection(monkeypatch):
     calls = []
 

@@ -220,15 +220,14 @@ def test_unknown_shared_catalog_blocks_every_mode():
         )
 
 
-@pytest.mark.xfail(strict=True, reason="None shared freshness raises AttributeError instead of returning unknown")
-def test_none_shared_freshness_is_unknown_and_blocks():
-    result = decide_history_eligibility(
-        replace(view(player()), shared=None), now=NOW, mode="transfers",
-        owned_player_ids=frozenset(), locked_player_ids=frozenset(), target_event=9,
-    )
-    assert (result.shared_status, result.blocked, result.candidates[0].action) == (
-        "unknown", True, "BLOCK",
-    )
+def test_none_shared_freshness_is_caller_error():
+    # §05B: "Unknown: no trusted publication exists for that scope."
+    # read_shared_freshness produces that status upstream; None here is a caller error.
+    with pytest.raises(ValueError, match="shared_freshness must not be None"):
+        decide_history_eligibility(
+            replace(view(player()), shared=None), now=NOW, mode="transfers",
+            owned_player_ids=frozenset(), locked_player_ids=frozenset(), target_event=9,
+        )
 
 
 def test_input_guards_reject_invalid_inputs():

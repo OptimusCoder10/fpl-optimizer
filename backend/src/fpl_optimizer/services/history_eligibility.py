@@ -117,6 +117,8 @@ def decide_history_eligibility(
         raise ValueError("required owned or locked player missing from view")
 
     shared = view.shared
+    if shared is None:
+        raise ValueError("shared_freshness must not be None")
     shared_status: Status = shared.status
     shared_reason = "shared catalog current"
     shared_warning = shared.age_warning
