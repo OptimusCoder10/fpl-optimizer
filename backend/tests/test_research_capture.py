@@ -6,6 +6,7 @@ from email.utils import format_datetime
 import gzip
 import json
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -348,6 +349,25 @@ async def test_research_storage_rejects_duplicate_or_malformed_listing(monkeypat
             await store.inventory()
 
 
+def test_capture_command_log_line_exact_bucket_bytes(monkeypatch, caplog):
+    from fpl_optimizer import capture_research as command
+    from fpl_optimizer.services.research_capture import CaptureResult
+    async def completed(*, self_test=False):
+        assert not self_test
+        return CaptureResult('captured', 'ok', bytes_used=123456,
+                             margin_seconds=321.5, players=672, exclusions=0)
+    monkeypatch.setattr(command, 'run', completed)
+    monkeypatch.setattr(command, 'time', SimpleNamespace(monotonic=lambda: 10.0))
+    monkeypatch.setattr('sys.argv', ['capture_research'])
+    with caplog.at_level('INFO', logger=command.__name__):
+        assert command.main() == 0
+    lines = [record.message for record in caplog.records if record.name == command.__name__]
+    assert lines == [
+        'Research capture: mode=prospective status=captured category=ok '
+        'bucket_bytes=123456 duration_s=0.000 margin_s=321.5 players=672 excluded=0'
+    ]
+
+
 def test_capture_command_failure_logs_only_safe_fields_and_returns_zero(monkeypatch, caplog):
     from fpl_optimizer import capture_research as command
     from fpl_optimizer import ingest
@@ -358,6 +378,9 @@ def test_capture_command_failure_logs_only_safe_fields_and_returns_zero(monkeypa
     monkeypatch.setattr('sys.argv', ['capture_research'])
     with caplog.at_level('INFO'):
         assert command.main() == 0
+    lines = [record.message for record in caplog.records if record.name == command.__name__]
+    assert len(lines) == 1 and ' bucket_bytes=0 ' in lines[0]
+    assert ' bytes=' not in lines[0]
     assert 'status=missed category=internal' in caplog.text
     assert 'synthetic-secret' not in caplog.text and 'private-payload' not in caplog.text
     assert ingest.run_ingestion is original

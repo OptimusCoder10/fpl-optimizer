@@ -64,7 +64,7 @@ def main():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     started = time.monotonic()
     result = asyncio.run(run(self_test=args.self_test))
-    logger.info("Research capture: mode=%s status=%s category=%s bytes=%d duration_s=%.3f margin_s=%s players=%d excluded=%d",
+    logger.info("Research capture: mode=%s status=%s category=%s bucket_bytes=%d duration_s=%.3f margin_s=%s players=%d excluded=%d",
                 "self_test" if args.self_test else "prospective", result.status, result.category,
                 result.bytes_used, time.monotonic() - started, result.margin_seconds, result.players, result.exclusions)
     # Capture failures are conveyed by safe status, never an ingestion exit change.
