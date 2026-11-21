@@ -2,7 +2,7 @@
 
 This file tracks live build progress — what's actually done, not just what's planned. Read this before starting any task; update it before finishing one.
 
-## Current State — 21 Nov 2026
+## Current State — 22 Nov 2026
 
 **Tool: Codex — 10 Nov 2026 (interview repository review).** Inspected the tracked backend, workflows, tests and benchmark evidence against this handoff and the available private specification. Analysis only: no implementation or test run; the existing frontend, transfer optimizer and recommendation API gaps remain open.
 
@@ -48,7 +48,7 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [x] HTTP layer derives manager-response completeness from the fetch result; failed or truncated transfers never become a complete empty history (Task 4a, fake-transport proof).
 - [x] Task 4b: authored scheduled/manual GitHub Actions workflow for the existing ingestion command; local configuration review only.
 - [x] Task 4b: inspect real Actions runs for CA/TLS connection and ingestion/checkpoint behavior across runner executions (owner-supplied logs; details below).
-- [x] §08G backend test CI: workflow added, first hosted run pending.
+- [x] §08G backend test CI: workflow added; owner-reported first hosted run had 888 passed, 1 skipped, 1 failed because the J41 differential test required an old commit absent from the shallow checkout. History-independent fix committed locally; hosted rerun pending.
 - [x] Phase 1B: run the suite on exactly Python 3.14.7 (349 passed, owner-run).
 - [ ] Controlled real-FPL probes validate the same parsing/publication paths after saved-fixture tests pass
 - [x] Phase 1B step 1: verified-TLS Supabase session-pooler connection, hosted migrations/schema check and rollback-only advisory-lock publication proof (2026-10-13; details below)
@@ -72,6 +72,7 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [ ] Phase 1B / §09C: create a least-privilege ingestion database role separate from the runtime role, then use its session URL for Actions.
 - [x] Phase 1B / J40: raw shared bootstrap/fixtures archive code, immutable gzip/metadata pair, 30-day intraday pruning and allowance reporting; owner-supplied 23 October live archive capture verified below.
 - [x] Phase 1B / J41: batch per-player history publication SQL and hoist the lock-protected shared catalog view; disposable-DB statement, differential, atomicity and regression proof complete
+- [x] Phase 1B / J41: differential test break-checked against a deliberate stored-value change; exact old source frozen in tests so shallow CI checkout needs no project history.
 - [x] Phase 1B / J42: pure per-player age/coverage eligibility decisions for lineup, transfers and simulator; 17 synthetic boundaries and four break tests complete
 - [ ] Phase 1B: review measured archive size/allowance and retention across more runs; ingestion role configuration remains open. The manual live archive check is recorded below.
 - [ ] Phase 2 live integration: verify the §04D prior-selection order on gated live inputs — previous-season same player → earlier current-season other same-position players → previous-season position pool; with no prior, use personal current observations alone without κ, otherwise report prediction unavailable.
@@ -189,6 +190,8 @@ Things the next session should know before touching this code.
 
 ## Tool Log
 Which tool did which piece of work — useful for knowing where to look first if something breaks.
+
+- **Tool: Codex — 22 Nov 2026 (J41 shallow-CI follow-up).** The owner reported that the first hosted backend CI run had **888 passed, 1 skipped, 1 failed**: the J41 differential test used `git show` for `eea8aa9`, unavailable in the workflow's shallow checkout. Saved that exact old source as a frozen non-importable test fixture, verified the source and fixture SHA-256 match, and changed only the test loader to read it. A temporary one-point stored-value change in the repository publisher made the named differential test fail on database state; source bytes and Git diff were identical after `/tmp` restore and backup deletion. Local full-suite counts before and after remained **889 passed, 1 skipped** on Python 3.14.7 with disposable PostgreSQL 17. The first post-change full attempt had **888 passed, 1 skipped, 1 failed** from the previously documented `/proc` child-disappearance race in the solver cleanup test; that named test and the complete rerun passed without code changes. A shallow-clone test run verifies the old commit is unnecessary. No workflow or application code change, live call or push; first hosted rerun pending.
 
 - **Tool: Codex — 21 Nov 2026 (backend CI contract follow-up).** Added two test-only assertions that checkout disables persisted credentials and setup-uv disables its cache. The existing PostgreSQL service already uses `pg_isready` in Docker health options; GitHub Actions waits for service health before job steps, so the workflow needed no wait change. Each new named test failed when its protected line was removed from the repository workflow, then the workflow was restored byte-for-byte from a `/tmp` backup, the backup deleted, and the Git diff confirmed identical. Full local Python 3.14.7 suite before: **887 passed, 1 skipped**; after: **889 passed, 1 skipped**, using disposable PostgreSQL 17. No hosted run, application code change or push.
 

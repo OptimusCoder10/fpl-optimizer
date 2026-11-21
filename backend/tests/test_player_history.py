@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
-import subprocess
 from types import ModuleType
 
 import pytest
@@ -33,11 +32,11 @@ from fpl_optimizer.services.shared_catalog import publish_shared_catalog
 
 def _previous_player_history_module() -> ModuleType:
     """Execute the exact publisher source at the pre-optimization commit."""
-    source = subprocess.run(
-        ["git", "show", "eea8aa9:backend/src/fpl_optimizer/services/player_history.py"],
-        capture_output=True, text=True, check=True,
-        cwd=Path(__file__).resolve().parents[2],
-    ).stdout
+    # Frozen reference: exact pre-optimization player_history.py source from eea8aa9.
+    # Never edit the fixture; it must remain byte-identical to that Git object.
+    source = (Path(__file__).parent / "fixtures" / "player_history_eea8aa9.py.txt").read_text(
+        encoding="utf-8"
+    )
     module = ModuleType("previous_player_history")
     exec(compile(source, "eea8aa9/player_history.py", "exec"), module.__dict__)
     return module
