@@ -263,3 +263,70 @@ def test_lineup_stale_player_in_grace_period_reports_both_reasons():
     assert (result.status, result.warning, result.action) == ("stale", True, "use")
     assert "lineup allowance" in result.reason
     assert "using previous finalized history during coverage grace" in result.reason
+
+
+def test_owned_and_locked_missing_or_invalid_coverage_block():
+    for required in ("owned", "locked"):
+        for field in ("missing_fixture_ids", "invalid_fixture_ids"):
+            result = decide(player(**{field: (102,)}), **{required: frozenset({1})})
+            candidate = result.candidates[0]
+            assert (candidate.status, candidate.action, result.blocked) == (
+                "stale", "BLOCK", True,
+            )
+            assert "102" in candidate.reason
+
+
+def test_owned_and_locked_players_without_publication_block():
+    unpublished = player(source_observed_at=None, last_success_at=None)
+    for required in ("owned", "locked"):
+        result = decide(unpublished, **{required: frozenset({1})})
+        candidate = result.candidates[0]
+        assert (candidate.status, candidate.action, result.blocked) == (
+            "unknown", "BLOCK", True,
+        )
+
+
+def test_lineup_48_hour_history_warning_boundary():
+    at = decide(player(age=timedelta(hours=48)), mode="lineup")
+    over = decide(player(age=timedelta(hours=48, seconds=1)), mode="lineup")
+    assert (at.candidates[0].status, at.candidates[0].warning, at.warning) == (
+        "current", False, False,
+    )
+    assert (over.candidates[0].status, over.candidates[0].warning,
+            over.candidates[0].action, over.blocked) == ("stale", True, "use", False)
+
+
+def test_unowned_lineup_player_beyond_96_hours_is_excluded_without_blocking():
+    result = decide(player(age=timedelta(hours=96, seconds=1)), mode="lineup")
+    assert (result.candidates[0].status, result.candidates[0].action, result.blocked) == (
+        "stale", "exclude", False,
+    )
+
+
+def test_validated_empty_new_player_prior_requires_no_rows_and_current_history():
+    with_rows = decide(player(validated_empty_new_player=True)).candidates[0]
+    stale_empty = decide(player(
+        age=timedelta(hours=48, seconds=1), covered_fixture_ids=frozenset(),
+        covered_finalized_fixture_ids=frozenset(), validated_empty_new_player=True,
+    )).candidates[0]
+    assert (with_rows.status, with_rows.may_use_prior) == ("current", False)
+    assert (stale_empty.status, stale_empty.may_use_prior) == ("stale", False)
+
+
+def test_source_after_success_is_rejected():
+    invalid = player(source_observed_at=NOW - timedelta(hours=1),
+                     last_success_at=NOW - timedelta(hours=2))
+    with pytest.raises(ValueError, match="history publication chronology is invalid"):
+        decide(invalid)
+
+
+def test_naive_history_and_finalization_timestamps_are_rejected():
+    naive = (NOW - timedelta(hours=3)).replace(tzinfo=None)
+    cases = (
+        (player(source_observed_at=naive), "source_observed_at"),
+        (player(last_success_at=naive), "last_success_at"),
+        (player(required_fixtures=(fixture(naive),)), "first_data_checked_at"),
+    )
+    for candidate, field in cases:
+        with pytest.raises(ValueError, match=f"{field} must include a UTC offset"):
+            decide(candidate)
