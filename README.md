@@ -1,6 +1,6 @@
 # FPL Optimizer
 
-A personalized Fantasy Premier League transfer/squad optimizer. Connects to your real FPL team via Team ID and recommends the mathematically optimal transfers, starting XI, and captaincy pick each gameweek — built on a custom prediction formula and a linear-programming optimizer.
+A personalized Fantasy Premier League transfer/squad optimizer in development. It is intended to connect to your real FPL team via Team ID and recommend transfers, a starting XI, and captaincy each gameweek using a prediction model and a linear-programming optimizer.
 
 > 🚧 Phase 1 data-layer work is in progress. The Phase 1A backend foundation is complete; see [`HANDOFF.md`](./HANDOFF.md) for current progress.
 
@@ -61,7 +61,7 @@ verification remain enabled; all other default verification flags are preserved.
 `publish_shared_catalog` takes a session factory and validated inputs, owns the
 commit/rollback, and returns the publication version or `None` after logging
 “already running”. The reusable `ingestion_lock` context uses one stable key for
-the database; future ingestion commands must hold it around their entire run,
+the database; ingestion commands hold it around their entire run,
 and online Alembic commands use the same lock and stop on contention. Both paths
 verify the actual lock and write connections reach the same database before writing.
 
@@ -74,8 +74,10 @@ strictly after one hour. A failed attempt or later replay of old source data
 cannot make its source age fresh. Publication versions remain provenance, not
 the future material-context digest used for manager reconfirmation.
 
-HTTP ingestion, Actions scheduling, broader history generation/eligibility gates,
-lineup-specific age allowances and the context API are still pending.
+HTTP ingestion, Actions scheduling and raw shared-data archiving are implemented.
+Broader history coverage, live prediction integration and the context API remain open.
+The opponent adjustment passed its benchmark only and is not in the live
+predictor; the first release stays on the baseline.
 
 ## Minimal backend and Render settings (Phase 1B step 2)
 
@@ -107,7 +109,7 @@ Run locally from `backend/`, after installing the locked dependencies:
   Empty means no cross-origin access. The current routes permit only GET; requests
   without an Origin header still work for health probes.
 
-These are **documented dashboard settings**, not an existing Render deployment:
+These are the documented settings used for the hosted Render health proof:
 
 | Setting | Value |
 |---|---|
@@ -119,7 +121,7 @@ These are **documented dashboard settings**, not an existing Render deployment:
 | Start command | `.venv/bin/uvicorn fpl_optimizer.main:create_app --factory --host 0.0.0.0 --port $PORT --workers 1` |
 | Health check path | `/health/ready` |
 | Automatic deploys | Disabled for this manual proof; CI-gated releases remain future work |
-| Plan / region | Owner selects when provisioning; not chosen or verified here |
+| Plan / region | Free instance / Singapore, verified for the hosted health proof |
 
 Environment variable **names only**: `PYTHON_VERSION`, `UV_VERSION`, `DATABASE_URL`,
 `DATABASE_SSL_CA_FILE`, `FRONTEND_ORIGIN`. Render supplies `PORT`.
@@ -131,8 +133,8 @@ dashboard. Do not run migrations in this build/start command.
 [Render's current Python documentation](https://render.com/docs/python-version)
 says any released version from 3.7.3 onward is supported, and
 [Python 3.14.7 was released on August 5, 2026](https://www.python.org/downloads/release/python-3147/).
-Thus the exact pin is supported according to documentation; actual hosted execution
-is still unproved. The repository pin remains unchanged. If Render rejects it,
+The hosted health proof ran on the exact pin. The repository pin remains
+unchanged. If Render rejects it in a later build,
 stop and report the build result: the owner must choose a supported replacement
 pin (a separate runtime-change task) or a Docker deploy that supplies 3.14.7.
 [Render health checks](https://render.com/docs/health-checks) require a successful
@@ -152,20 +154,19 @@ libraries or executable permissions are incompatible; startup checks again in th
 runtime environment. This packaging claim is specific to
 [PuLP 3.3.0](https://pypi.org/project/PuLP/3.3.0/); reevaluate it before upgrading.
 
-**Proposed CA delivery:** paste the project's public Supabase CA PEM into a
+**Hosted CA delivery:** the project's public Supabase CA PEM is in a
 [Render secret file](https://render.com/docs/configure-environment-variables#secret-files)
-and privately set `DATABASE_SSL_CA_FILE` to its `/etc/secrets/<filename>` path.
+with `DATABASE_SSL_CA_FILE` set privately to its `/etc/secrets/<filename>` path.
 This uses the existing file setting without a code change; no inline PEM environment
 setting was added. Both remote engines retain `CERT_REQUIRED`, hostname verification
 and the already-authorized explicit-CA strict-bit compatibility policy described
 above. A missing/invalid file makes readiness fail safely. Never substitute an
 unverified connection. Keep the actual file/path and connection values out of Git.
 
-After the owner deploys: check both health paths, confirm readiness shows database
-available and solver `optimal`, objective 7, selection `[0, 1, 1]`; verify CORS from
-the intended frontend and another origin. Record Render's actual Python/CBC versions
-and cold/warm behavior. No hosted application, TLS/CBC execution, provisioning or
-deployment outcome is claimed by these local checks.
+The hosted health proof returned 200 from both routes with verified-TLS database
+readiness and serial CBC execution on Python 3.14.7; cold and warm health timings
+are recorded in `HANDOFF.md`. Actual frontend CORS and threaded CBC behavior on
+Render remain unverified.
 
 ## Pinned prior-season archive (slice 1.5)
 
@@ -254,8 +255,8 @@ Invalid/incomplete shared responses preserve the last good catalog and success
 time; failed attempts are recorded separately on an existing shared checkpoint.
 Before the first trusted publication, failures are logged without creating a
 season or success checkpoint. Exit code 1 means failure or partial player failure;
-lock contention and a clean budget stop exit 0. Scheduling and archives are still
-separate work. The existing runner's daily due times remain in use; sweep generations
+lock contention and a clean budget stop exit 0. Actions scheduling and raw shared
+archiving are implemented. The existing runner's daily due times remain in use; sweep generations
 and broader coverage eligibility remain deferred as recorded in `HANDOFF.md`.
 
 Manager HTTP imports use `fetch_manager_import` with captured catalog deadlines
