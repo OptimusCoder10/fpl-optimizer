@@ -65,3 +65,17 @@ def test_backend_ci_uses_disposable_database_and_pinned_tools():
         "uv sync --frozen --all-groups",
         "uv run --frozen pytest",
     ]
+
+
+def test_backend_ci_checkout_does_not_persist_credentials():
+    checkout = workflow_text().split("      - name: Check out source\n", 1)[1].split(
+        "      - name:", 1
+    )[0]
+    assert "          persist-credentials: false\n" in checkout
+
+
+def test_backend_ci_uv_cache_is_disabled():
+    setup_uv = workflow_text().split("      - name: Install uv\n", 1)[1].split(
+        "      - name:", 1
+    )[0]
+    assert "          enable-cache: false\n" in setup_uv
