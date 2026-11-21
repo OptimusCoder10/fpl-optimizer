@@ -8,7 +8,7 @@ This file tracks live build progress — what's actually done, not just what's p
 
 Decision-log follow-up (Codex, 8 Nov 2026): recorded the already-approved Slice D evidence limit in the private high-level decision log and clarified that qualifying decisions must be logged when approved. No change to the accepted contract or implementation.
 
-Implementation commits through `e2099d1`; latest full Python 3.14.7 suite: **881 passed, 1 skipped, 0 failed**. The earlier 800-pass header was stale: the saved-bundle audit and storage-probe commits added 83 collected tests before `bfe4e1c`, and `e2099d1` added one more. The older recorded 800-pass result does not reconcile exactly with today's 798-test collection at its cited commit.
+Implementation commits through `e2099d1`; latest full Python 3.14.7 suite: **887 passed, 1 skipped, 0 failed** after six backend CI workflow contract tests. The prior baseline was 881 passed, 1 skipped. The earlier 800-pass header was stale: the saved-bundle audit and storage-probe commits added 83 collected tests before `bfe4e1c`, and `e2099d1` added one more. The older recorded 800-pass result does not reconcile exactly with today's 798-test collection at its cited commit.
 
 Phase 1 data services through the scoped slice 1.6 and Task 4a HTTP/manual ingestion are implemented with synthetic HTTP tests; broader history eligibility, live-FPL probes and real-manager validation remain open. Task 4b's scheduled/manual Actions ingestion has published shared data and resumed history across separate runner executions. Hosted Supabase migrations and rollback-only publication passed. Render's Singapore free instance built on Python 3.14.7, passed the serial CBC proof and returned 200 from both health routes with verified-TLS database readiness. Cold/warm health timings are recorded below. Actual frontend CORS and threaded CBC on Render remain unverified.
 
@@ -48,7 +48,7 @@ Phase 1 — Data Layer (see docs/spec/10-roadmap.html). The v1 decision record i
 - [x] HTTP layer derives manager-response completeness from the fetch result; failed or truncated transfers never become a complete empty history (Task 4a, fake-transport proof).
 - [x] Task 4b: authored scheduled/manual GitHub Actions workflow for the existing ingestion command; local configuration review only.
 - [x] Task 4b: inspect real Actions runs for CA/TLS connection and ingestion/checkpoint behavior across runner executions (owner-supplied logs; details below).
-- [ ] No push-triggered test CI exists (§08G open).
+- [x] §08G backend test CI: workflow added, first hosted run pending.
 - [x] Phase 1B: run the suite on exactly Python 3.14.7 (349 passed, owner-run).
 - [ ] Controlled real-FPL probes validate the same parsing/publication paths after saved-fixture tests pass
 - [x] Phase 1B step 1: verified-TLS Supabase session-pooler connection, hosted migrations/schema check and rollback-only advisory-lock publication proof (2026-10-13; details below)
@@ -189,6 +189,8 @@ Things the next session should know before touching this code.
 
 ## Tool Log
 Which tool did which piece of work — useful for knowing where to look first if something breaks.
+
+- **Tool: Codex — 21 Nov 2026 (§08G backend test CI).** Added a separate push-to-main/pull-request workflow with read-only repository permissions, its own concurrency group, pinned checkout and uv actions, Python 3.14.7, frozen all-group dependencies, and a disposable PostgreSQL 17 service matching the test database and port. It runs only the synthetic backend suite with a fixed local `TEST_DATABASE_URL`; no repository secret, production database setting, FPL call or Supabase call is configured. Six workflow contract tests cover triggers, permissions, secrets, schedule, concurrency and execution setup. The read-only-permissions and no-secrets tests each failed under a deliberate repository-workflow mutation; each file was restored from a `/tmp` backup, the backup deleted, and the Git diff and workflow bytes confirmed identical. Full suite before: **881 passed, 1 skipped**; after: **887 passed, 1 skipped** on Python 3.14.7 with a disposable local PostgreSQL 17 container. The first hosted run remains pending; hosted `/proc` process timing, CBC behavior and runtime are not inferred from this local pass. No application code change or push.
 
 - **Tool: Codex — 21 Nov 2026 (documentation refresh).** Updated the latest full-suite header from the verified Python 3.14.7 run at `e2099d1`, recorded that no push-triggered test CI exists, and clarified the sibling extras location of persistent benchmark reports and lock files. README now distinguishes completed ingestion, archiving and hosted health work from open coverage, live predictor and frontend checks; the opponent result remains benchmark-only. Documentation only; no code, workflow, log, test run or push.
 

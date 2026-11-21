@@ -1,0 +1,57 @@
+name: Backend tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fpl-backend-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: fpl_optimizer_test
+          POSTGRES_USER: fpl_optimizer
+          POSTGRES_PASSWORD: fpl_optimizer_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U fpl_optimizer -d fpl_optimizer_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+          --health-start-period 5s
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://fpl_optimizer:fpl_optimizer_test@127.0.0.1:5433/fpl_optimizer_test
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.19"
+          enable-cache: false
+
+      - name: Install Python
+        run: uv python install 3.14.7
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Run backend tests
+        run: uv run --frozen pytest
