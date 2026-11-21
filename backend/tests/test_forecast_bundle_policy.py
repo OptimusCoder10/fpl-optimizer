@@ -123,6 +123,16 @@ def test_kickoff_equal_to_as_of_excluded_strictly_before_required():
     assert eligible((Row(101, 90),), (fixture(kickoff=NOW),)) == ()
 
 
+def test_research_rows_reject_nonpositive_target_event_id():
+    for target in (0, -1):
+        with pytest.raises(ValueError, match="target_event_id must be positive"):
+            eligible((Row(101, 90),), (fixture(),), target=target)
+
+
+def test_research_rows_skip_fixture_with_missing_catalog_gameweek():
+    assert eligible((Row(101, 90),), (fixture(),), gameweeks=(gw(7),)) == ()
+
+
 def test_label_never_claims_coverage_verified():
     required = (RequiredFixture(102, 8, NOW - timedelta(hours=3)),)
     result = label(required_fixtures=required)

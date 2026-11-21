@@ -220,6 +220,17 @@ def test_unknown_shared_catalog_blocks_every_mode():
         )
 
 
+@pytest.mark.xfail(strict=True, reason="None shared freshness raises AttributeError instead of returning unknown")
+def test_none_shared_freshness_is_unknown_and_blocks():
+    result = decide_history_eligibility(
+        replace(view(player()), shared=None), now=NOW, mode="transfers",
+        owned_player_ids=frozenset(), locked_player_ids=frozenset(), target_event=9,
+    )
+    assert (result.shared_status, result.blocked, result.candidates[0].action) == (
+        "unknown", True, "BLOCK",
+    )
+
+
 def test_input_guards_reject_invalid_inputs():
     base = view(player())
     inputs = dict(now=NOW, mode="transfers", owned_player_ids=frozenset(),

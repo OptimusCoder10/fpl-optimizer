@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
 import json
 from pathlib import Path
 from types import ModuleType
@@ -40,6 +41,13 @@ def _previous_player_history_module() -> ModuleType:
     module = ModuleType("previous_player_history")
     exec(compile(source, "eea8aa9/player_history.py", "exec"), module.__dict__)
     return module
+
+
+def test_frozen_previous_player_history_matches_source_sha256():
+    source = Path(__file__).parent / "fixtures" / "player_history_eea8aa9.py.txt"
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == (
+        "b629e26d2151b8fc1b5d6db5c075f7892e1206f8fa3f53985599ceed466f9c18"
+    )
 
 
 pytestmark = pytest.mark.database

@@ -69,6 +69,12 @@ def by_id(records):
     return {record.player_id: record for record in records}
 
 
+def test_research_inputs_reject_invalid_label_action():
+    view, labels = sample()
+    with pytest.raises(ValueError, match="use requires a current research history label"):
+        assembly.assemble_player_inputs(view, labels | {1: replace(USE, action="BLOCK")})
+
+
 def capture_selection(monkeypatch):
     calls = []
 
