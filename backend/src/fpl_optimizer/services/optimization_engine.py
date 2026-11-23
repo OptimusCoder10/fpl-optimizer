@@ -1,4 +1,4 @@
-"""Fixed-squad XI/captain MILP, using explicit synthetic inputs only.
+"""Fixed-squad XI/captain MILP and shared bounded serial CBC runtime.
 
 No application state, network, database or async work. CBC runs serially in a
 bounded child process. Application admission/cancellation remains Phase 4 work.
@@ -108,8 +108,27 @@ class _CBC(pulp.PULP_CBC_CMD):
         return super().get_status(filename)
 
 
+def _numeric_export_is_exact(problem):
+    """Check the pinned PuLP 3.3 MPS format (.12e) and exact-double range.
+
+    Check assembled expressions, not only inputs: a fixed-S RHS or the money
+    constraint's constant can lose digits even when individual inputs do not.
+    """
+    expressions = [problem.objective, *problem.constraints.values()]
+    for expression in expressions:
+        values = [expression.constant, *expression.values()]
+        if sum(abs(v) for v in values) > 2**53 - 1:
+            return False
+        if any(not math.isfinite(v) or Decimal(format(v, ".12e")) != Decimal(v)
+               for v in values):
+            return False
+    return True
+
+
 def _solve_model(players, deadline, scratch_directory):
     problem, y, c = _build_model(players)
+    if not _numeric_export_is_exact(problem):
+        return {"failure": "unsafe_numeric_range"}
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return {"problem_status": 0, "solution_status": 0, "timed_out": True}
@@ -134,11 +153,14 @@ def _solve_model(players, deadline, scratch_directory):
 
 
 def _run_worker(players, deadline):
+    return _run_problem({"players": [asdict(p) for p in players]}, deadline)
+
+
+def _run_problem(request, deadline):
     # TemporaryDirectory is owned by the parent, so even a killed CBC leaves no
     # model/solution files. The whole worker/CBC process group is always reaped.
     with TemporaryDirectory(prefix="fpl-lineup-") as scratch:
-        payload = json.dumps({"players": [asdict(p) for p in players],
-                              "deadline": deadline, "scratch": scratch})
+        payload = json.dumps({**request, "deadline": deadline, "scratch": scratch})
         if time.monotonic() >= deadline:
             return {"problem_status": 0, "solution_status": 0, "timed_out": True}
         process = subprocess.Popen(
@@ -162,9 +184,12 @@ def _run_worker(players, deadline):
 
 
 def _status(problem_status, solution_status, timed_out):
-    if timed_out and (problem_status == pulp.LpStatusInfeasible
-                      or solution_status == pulp.LpSolutionInfeasible):
-        return "solver_failure"  # Contradictory stop evidence cannot prove infeasibility.
+    if timed_out:
+        # A claimed incumbent must still validate. Relaxation values without an
+        # integer-solution claim are not an incumbent, even if values exist.
+        if solution_status in (pulp.LpSolutionOptimal, pulp.LpSolutionIntegerFeasible):
+            return "feasible_unproven"
+        return "timeout_no_solution"
     if (problem_status == pulp.LpStatusOptimal and solution_status == pulp.LpSolutionOptimal
             and not timed_out):
         return "optimal"
@@ -175,10 +200,16 @@ def _status(problem_status, solution_status, timed_out):
     if (problem_status == pulp.LpStatusInfeasible
             and solution_status == pulp.LpSolutionInfeasible):
         return "infeasible"
-    if (problem_status == pulp.LpStatusNotSolved
-            and solution_status == pulp.LpSolutionNoSolutionFound and timed_out):
-        return "timeout_no_solution"
     return "solver_failure"
+
+
+def _status_reason(raw, status):
+    if raw.get("timed_out") and (
+        raw["problem_status"] == pulp.LpStatusInfeasible
+        or raw["solution_status"] == pulp.LpSolutionInfeasible
+    ):
+        return "timeout_status_conflict"
+    return "unrecognized_solver_status" if status == "solver_failure" else None
 
 
 def _binary_values(values, count):
@@ -248,8 +279,7 @@ def solve_lineup(
             except (KeyError, TypeError, ValueError, StopIteration, OverflowError):
                 return result("solver_failure", problem_status=ps, solution_status=ss,
                               reason="invalid_solution")
-        return result(status, solution, ps, ss,
-                      "unrecognized_solver_status" if status == "solver_failure" else None)
+        return result(status, solution, ps, ss, _status_reason(raw, status))
     except (OSError, ValueError, TypeError, KeyError):
         return result("solver_failure", reason="worker_failure")
 
@@ -257,11 +287,21 @@ def solve_lineup(
 def _worker_main():
     try:
         request = json.load(sys.stdin)
-        players = tuple(LineupPlayer(**p) for p in request["players"])
-        output = _solve_model(players, request["deadline"], request["scratch"])
+        if request.get("mode") == "transfers":
+            from fpl_optimizer.services.transfer_optimization import _solve_stage_worker
+            output = _solve_stage_worker(request)
+        else:
+            players = tuple(LineupPlayer(**p) for p in request["players"])
+            output = _solve_model(players, request["deadline"], request["scratch"])
     except Exception:
         output = {"failure": "solver_execution_failure"}
     print(json.dumps(output))
+
+
+def solve_transfers(inputs, time_budget_seconds):
+    """Ordinary free-transfer comparison; implementation kept separate from lineup."""
+    from fpl_optimizer.services.transfer_optimization import solve_transfers as solve
+    return solve(inputs, time_budget_seconds)
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["--worker"]:

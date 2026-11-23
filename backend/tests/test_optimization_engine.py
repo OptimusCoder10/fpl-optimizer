@@ -259,9 +259,9 @@ def fake_solver(monkeypatch, ps, ss, *, timed_out=False, mutate=None):
     (-1, -1, False, "infeasible"), (0, 0, True, "timeout_no_solution"),
     (0, 0, False, "solver_failure"), (-3, 0, False, "solver_failure"),
     (-2, -2, False, "solver_failure"), (1, 0, False, "solver_failure"),
-    (-1, 2, False, "solver_failure"), (0, -1, True, "solver_failure"),
+    (-1, 2, False, "solver_failure"), (0, -1, True, "timeout_no_solution"),
     (-1, 1, False, "solver_failure"), (999, 999, False, "solver_failure"),
-    (-1, -1, True, "solver_failure"), (1, 1, True, "feasible_unproven"),
+    (-1, -1, True, "timeout_no_solution"), (1, 1, True, "feasible_unproven"),
 ])
 def test_dual_solver_status_mapping(monkeypatch, ps, ss, timed_out, expected):
     fake_solver(monkeypatch, ps, ss, timed_out=timed_out)
