@@ -1,4 +1,4 @@
-"""Explicit ordinary, chip-free transfer inputs; no manager-state discovery."""
+"""Explicit ordinary, chip-free transfer inputs and optional hit evidence."""
 
 from dataclasses import dataclass
 
@@ -40,6 +40,7 @@ class TransferInputs:
     transfers_made: int
     locked_ids: tuple[int, ...] = ()
     excluded_ids: tuple[int, ...] = ()
+    already_incurred_hit_units: int = 0  # display only; never deducted again
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,40 @@ class TransferStage:
 
 
 @dataclass(frozen=True)
+class HitComparison:
+    """Scenario evidence, not an automatic recommendation.
+
+    Net score deducts only the additional hit. Gain compares against the best
+    available hold/free incumbent; offered requires that baseline to be proven.
+    only_feasible_option is diagnostic and never overrides the offer gate.
+    """
+    primary: TransferStage
+    gross_score_units: int | None
+    net_score_units: int | None
+    net_gain_units: int | None
+    additional_hit_units: int
+    already_incurred_hit_units: int
+    offered: bool
+    advisory: bool
+    only_feasible_option: bool
+    reason: str
+
+    @property
+    def gross_score_points(self) -> float | None:
+        return None if self.gross_score_units is None else self.gross_score_units / 1000
+
+    @property
+    def net_score_points(self) -> float | None:
+        return None if self.net_score_units is None else self.net_score_units / 1000
+
+    @property
+    def net_gain_points(self) -> float | None:
+        return None if self.net_gain_units is None else self.net_gain_units / 1000
+
+
+@dataclass(frozen=True)
 class TransferResult:
+    """Hold/free comparison and, when requested, separate hit scenario evidence."""
     status: SolveStatus  # primary comparison; see fewer_transfers_proven separately
     solution: TransferSolution | None
     selected_scenario: str | None
@@ -87,3 +121,4 @@ class TransferResult:
     elapsed_seconds: float
     model_version: str = "ordinary-free-transfers-v1"
     bench_bank_stages: str = "not_enabled"
+    hit: HitComparison | None = None

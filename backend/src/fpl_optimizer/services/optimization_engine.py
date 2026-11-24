@@ -298,10 +298,10 @@ def _worker_main():
     print(json.dumps(output))
 
 
-def solve_transfers(inputs, time_budget_seconds):
-    """Ordinary free-transfer comparison; implementation kept separate from lineup."""
+def solve_transfers(inputs, time_budget_seconds, *, include_hit=False):
+    """Ordinary transfers with optional hit comparison, kept separate from lineup."""
     from fpl_optimizer.services.transfer_optimization import solve_transfers as solve
-    return solve(inputs, time_budget_seconds)
+    return solve(inputs, time_budget_seconds, include_hit=include_hit)
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["--worker"]:

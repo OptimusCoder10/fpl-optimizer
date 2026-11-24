@@ -6,7 +6,7 @@ from itertools import combinations
 from lineup_oracle import exhaustive_lineup_score
 
 
-def exhaustive_transfers(inputs):
+def exhaustive_transfers(inputs, *, scenario="ordinary"):
     owned = {o.player_id: o.selling_price_tenths for o in inputs.owned}
     eligible = []
     for p in inputs.players:
@@ -22,7 +22,12 @@ def exhaustive_transfers(inputs):
             continue
         incoming, outgoing = ids-owned.keys(), owned.keys()-ids
         n = len(incoming)
-        if n != len(outgoing) or n > inputs.free_transfers or inputs.transfers_made+n > 20:
+        if n != len(outgoing) or inputs.transfers_made+n > 20:
+            continue
+        if (scenario == "hit" and n != inputs.free_transfers+1
+                or scenario == "ordinary" and n > inputs.free_transfers
+                or scenario == "hold" and n != 0
+                or scenario == "free" and not 1 <= n <= inputs.free_transfers):
             continue
         if any(owned[i] is None for i in outgoing):
             continue

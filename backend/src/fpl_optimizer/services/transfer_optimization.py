@@ -1,7 +1,8 @@
 """Hold versus ordinary free transfers, with a proven-score-preserving second stage.
 
 The caller supplies confirmed ordinary, chip-free state after the first deadline.
-No HTTP, database, async, hit, simulator, bench/bank objective or fallback model.
+Optional exact-one-extra-transfer hit comparison shares the same deadline.
+No HTTP, database, async, simulator, bench/bank objective or fallback model.
 """
 
 from collections import Counter
@@ -12,11 +13,11 @@ import time
 import pulp
 
 from fpl_optimizer.schemas.transfers import (
-    CandidateExclusion, OwnedPlayer, TransferInputs, TransferPlayer,
+    CandidateExclusion, HitComparison, OwnedPlayer, TransferInputs, TransferPlayer,
     TransferResult, TransferSolution, TransferStage,
 )
 from fpl_optimizer.services import optimization_engine as runtime
-from fpl_optimizer.services.transfer_validation import validate_transfer_solution
+from fpl_optimizer.services.transfer_validation import validate_transfer_solution, validate_hit_comparison
 
 
 def _prepare(inputs, budget):
@@ -33,6 +34,9 @@ def _prepare(inputs, budget):
                                   (inputs.free_transfers, "F", 5), (inputs.transfers_made, "T", 20)):
         if type(value) is not int or value < 0 or (maximum is not None and value > maximum):
             raise ValueError(f"invalid {name}")
+    if (type(inputs.already_incurred_hit_units) is not int
+            or inputs.already_incurred_hit_units < 0 or inputs.already_incurred_hit_units % 4000):
+        raise ValueError("already incurred hits must be nonnegative multiples of 4000 units")
     for p in inputs.players:
         if not isinstance(p, TransferPlayer):
             raise ValueError("expected TransferPlayer")
@@ -99,9 +103,11 @@ def _prepare(inputs, budget):
     return inputs, tuple(active), tuple(exclusions)
 
 
-def _build_transfer_model(inputs, players, fixed_score=None):
+def _build_transfer_model(inputs, players, fixed_score=None, *, scenario="transfers"):
     """Ownership is fixed data; incoming/outgoing counts are derived from x."""
-    problem = pulp.LpProblem("free_transfers", pulp.LpMaximize if fixed_score is None else pulp.LpMinimize)
+    if scenario not in ("transfers", "hit") or (scenario == "hit" and fixed_score is not None):
+        raise ValueError("unsupported scenario or hit secondary stage")
+    problem = pulp.LpProblem(scenario, pulp.LpMaximize if fixed_score is None else pulp.LpMinimize)
     x = {p.player_id: pulp.LpVariable(f"x_{p.player_id}", cat="Binary") for p in players}
     y = {p.player_id: pulp.LpVariable(f"y_{p.player_id}", cat="Binary") for p in players}
     c = {p.player_id: pulp.LpVariable(f"c_{p.player_id}", cat="Binary") for p in players}
@@ -129,8 +135,11 @@ def _build_transfer_model(inputs, players, fixed_score=None):
         problem += y[i] <= x[i], f"starter_owned_{i}"
         problem += c[i] <= y[i], f"captain_starts_{i}"
     problem += bank >= 0, "money"
-    problem += n >= 1, "positive_transfers"
-    problem += n <= inputs.free_transfers, "free_cap"
+    if scenario == "hit":
+        problem += n == inputs.free_transfers + 1, "exact_hit_count"
+    else:
+        problem += n >= 1, "positive_transfers"
+        problem += n <= inputs.free_transfers, "free_cap"
     problem += inputs.transfers_made + n <= 20, "ordinary_cap"
     for club in sorted({p.club_id for p in players}):
         problem += pulp.lpSum(x[p.player_id] for p in players if p.club_id == club) <= 3, f"club_{club}"
@@ -151,7 +160,8 @@ def _solve_stage_worker(request):
     inputs = TransferInputs(**{**data, "players": tuple(TransferPlayer(**p) for p in data["players"]),
                                "owned": tuple(OwnedPlayer(**p) for p in data["owned"])})
     players = tuple(TransferPlayer(**p) for p in request["active_players"])
-    problem, x, y, c, score, n, bank = _build_transfer_model(inputs, players, request["fixed_score"])
+    problem, x, y, c, score, n, bank = _build_transfer_model(inputs, players, request["fixed_score"],
+        scenario=request.get("scenario", "transfers"))
     if not runtime._numeric_export_is_exact(problem):
         return {"failure": "unsafe_numeric_range"}
     remaining = request["deadline"] - time.monotonic()
@@ -181,7 +191,7 @@ def _integer(value):
     return int(value)
 
 
-def _decode_solution(inputs, players, raw, fixed_score):
+def _decode_solution(inputs, players, raw, fixed_score, *, scenario="transfers"):
     xs = runtime._binary_values(raw["x"], len(players))
     ys = runtime._binary_values(raw["y"], len(players))
     cs = runtime._binary_values(raw["c"], len(players))
@@ -196,19 +206,19 @@ def _decode_solution(inputs, players, raw, fixed_score):
     solution = TransferSolution(selected_ids, lineup,
         tuple(sorted(set(selected_ids) - owned_ids)), tuple(sorted(owned_ids - set(selected_ids))),
         _integer(raw["transfers"]), _integer(raw["bank"]))
-    validate_transfer_solution(inputs, solution, scenario="transfers", fixed_score=fixed_score)
+    validate_transfer_solution(inputs, solution, scenario=scenario, fixed_score=fixed_score)
     expected = lineup.score_units if fixed_score is None else solution.transfer_count
     if _integer(raw["objective"]) != expected:
         raise ValueError("stage objective does not match solution")
     return solution
 
 
-def _transfer_stage(inputs, players, deadline, fixed_score=None):
+def _transfer_stage(inputs, players, deadline, fixed_score=None, *, scenario="transfers"):
     started = time.monotonic()
     remaining = max(0, deadline - started)
     try:
         raw = runtime._run_problem({"mode": "transfers", "inputs": asdict(inputs),
-            "active_players": [asdict(p) for p in players], "fixed_score": fixed_score}, deadline)
+            "active_players": [asdict(p) for p in players], "fixed_score": fixed_score, "scenario": scenario}, deadline)
         if "failure" in raw:
             return TransferStage("solver_failure", reason=raw["failure"], budget_seconds=remaining,
                                  elapsed_seconds=time.monotonic()-started)
@@ -217,7 +227,7 @@ def _transfer_stage(inputs, players, deadline, fixed_score=None):
         solution = None
         if status in ("optimal", "feasible_unproven"):
             try:
-                solution = _decode_solution(inputs, players, raw, fixed_score)
+                solution = _decode_solution(inputs, players, raw, fixed_score, scenario=scenario)
             except (ValueError, KeyError, TypeError, OverflowError, StopIteration):
                 return TransferStage("solver_failure", problem_status=ps, solution_status=ss,
                     reason="invalid_solution", budget_seconds=remaining, elapsed_seconds=time.monotonic()-started)
@@ -261,13 +271,36 @@ def _hold_stage(inputs, players, deadline):
                              elapsed_seconds=time.monotonic()-started)
 
 
-def solve_transfers(inputs: TransferInputs, time_budget_seconds: float) -> TransferResult:
-    """One deadline for hold primary, transfer primary, then fewer transfers.
+def _hit_comparison(inputs, stage, hold, free, baseline, proven):
+    gross = stage.solution.lineup.score_units if stage.solution is not None else None
+    net = None if gross is None else gross - 4000
+    gain = None if net is None or baseline is None else net - baseline.lineup.score_units
+    only = stage.solution is not None and hold.status == free.status == "infeasible"
+    offered = gain is not None and proven and gain > 0
+    advisory = offered and stage.status != "optimal"
+    if gross is None:
+        reason = stage.reason or "no_hit_solution"
+    elif baseline is None:
+        reason = "no_feasible_baseline"
+    elif not proven:
+        reason = "baseline_not_proven"
+    elif not offered:
+        reason = "insufficient_net_gain"
+    else:
+        reason = "advisory" if advisory else "proven_improvement"
+    return HitComparison(stage, gross, net, gain, 4000, inputs.already_incurred_hit_units,
+                         offered, advisory, only, reason)
+
+
+def solve_transfers(inputs: TransferInputs, time_budget_seconds: float, *, include_hit=False) -> TransferResult:
+    """One deadline: hold primary, free primary, optional hit primary, fewer transfers.
 
     Stage-one solutions live in the parent, outside each bounded solver worker.
     A failed/expired second stage cannot erase the proven primary solution.
     """
     started = time.monotonic()
+    if type(include_hit) is not bool:
+        raise ValueError("include_hit must be a boolean")
     inputs, players, exclusions = _prepare(inputs, time_budget_seconds)
     deadline = started + time_budget_seconds
     # Bound original integer inputs before PuLP converts any compound constant.
@@ -282,6 +315,14 @@ def solve_transfers(inputs: TransferInputs, time_budget_seconds: float) -> Trans
         free = TransferStage("solver_failure", reason="unsafe_numeric_range")
     else:
         free = _transfer_stage(inputs, players, deadline)
+    hit_stage = None
+    if include_hit:
+        if inputs.transfers_made + inputs.free_transfers + 1 > 20:
+            hit_stage = TransferStage("infeasible", reason="ordinary_cap_exceeded")
+        elif unsafe:
+            hit_stage = TransferStage("solver_failure", reason="unsafe_numeric_range")
+        else:
+            hit_stage = _transfer_stage(inputs, players, deadline, scenario="hit")
     fewer = TransferStage("not_run", reason="primary_not_proven")
     free_solution = free.solution
     if free.status == "infeasible":
@@ -318,5 +359,14 @@ def solve_transfers(inputs: TransferInputs, time_budget_seconds: float) -> Trans
         status = "timeout_no_solution"
     eligible = sum(p.player_id not in inputs.excluded_ids for p in players)
     retained = tuple(sorted(o.player_id for o in inputs.owned if o.selling_price_tenths is None))
+    hit = None
+    if include_hit:
+        hit = _hit_comparison(inputs, hit_stage, hold, free, chosen, proven)
+        try:
+            validate_hit_comparison(inputs, hit, hold, free, chosen, proven)
+        except (ValueError, TypeError, KeyError):
+            hit_stage = replace(hit_stage, status="solver_failure", solution=None, reason="invalid_solution")
+            hit = _hit_comparison(inputs, hit_stage, hold, free, chosen, proven)
     return TransferResult(status, chosen, scenario, hold, free, fewer, proven, fewer_proven,
-        eligible, exclusions, retained, time_budget_seconds, time.monotonic()-started)
+        eligible, exclusions, retained, time_budget_seconds, time.monotonic()-started,
+        model_version="ordinary-transfers-hit-v1" if include_hit else "ordinary-free-transfers-v1", hit=hit)
